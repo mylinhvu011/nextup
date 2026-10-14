@@ -1,0 +1,33 @@
+{
+  // Next Up — Cloudflare Workers config (works on the free plan)
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "next-up",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+
+  // The website (HTML, JS, icons, service worker) is served from ./public
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // One Registry (accounts, join codes, push keys) + one EventRoom per event
+  "durable_objects": {
+    "bindings": [
+      { "name": "REGISTRY", "class_name": "Registry" },
+      { "name": "EVENTS", "class_name": "EventRoom" }
+    ]
+  },
+  // Free plan requires SQLite-backed Durable Objects
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Registry", "EventRoom"] }
+  ],
+
+  "vars": {
+    // Contact for push services — change to your email
+    "VAPID_SUBJECT": "mailto:organizer@example.com"
+  },
+
+  "observability": { "enabled": true }
+}

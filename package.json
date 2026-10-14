@@ -1,0 +1,19 @@
+{
+  "name": "next-up",
+  "version": "2.0.0",
+  "description": "Live pickup-game sign-up board with push notifications (Cloudflare Workers)",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test/webpush.test.mjs && node test/smoke.mjs"
+  },
+  "devDependencies": {
+    "http_ece": "^1.2.1",
+    "wrangler": "^4.150.0"
+  },
+  "private": true,
+  "type": "module"
+}
