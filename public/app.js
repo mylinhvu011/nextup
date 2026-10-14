@@ -17,6 +17,88 @@ const mgrSession = () => store.get('nu.manager');
 const playerSession = eid => store.get('nu.player.' + eid);
 
 let cfg = { vapidPublicKey: '', signupCodeRequired: false };
+
+/* ---------------- color themes ---------------- */
+// main = buttons & field headers (darker shades are derived), accent = highlights, pinnie = bib color
+const THEMES = [
+  { id: 'pitch', name: 'Pitch green', main: '#1f8a5b', accent: '#c6f24e', pinnie: '#ff7a1a' },
+  { id: 'midnight', name: 'Midnight', main: '#2f5fb3', accent: '#ffd23f', pinnie: '#ff5a5f' },
+  { id: 'crimson', name: 'Crimson', main: '#c8102e', accent: '#ffd166', pinnie: '#1fb5d6' },
+  { id: 'royal', name: 'Royal', main: '#6b3fd1', accent: '#7ef0c9', pinnie: '#ff8a3d' },
+  { id: 'ocean', name: 'Ocean', main: '#0f8f8a', accent: '#a8f0ff', pinnie: '#ff6f91' },
+  { id: 'sunset', name: 'Sunset', main: '#e0661f', accent: '#ffe066', pinnie: '#2bb3a3' }
+];
+const DEFAULT_THEME = { preset: 'pitch', main: THEMES[0].main, accent: THEMES[0].accent, pinnie: THEMES[0].pinnie };
+const hexRgb = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+const rgbHex = (r, g, b) => '#' + [r, g, b].map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+const shade = (h, amt) => rgbHex(...hexRgb(h).map(v => v * (1 - amt)));
+function luminance(h) {
+  const c = hexRgb(h).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+const textOn = h => (luminance(h) > 0.22 ? '#111a15' : '#ffffff'); // readable text on any background
+const THEME_VARS = ['--grass', '--pitch', '--pitch-2', '--lime', '--pinnie', '--on-primary', '--on-accent', '--on-pinnie', '--accent-on-dark'];
+const themeMeta = () => document.querySelector('meta[name=theme-color]');
+
+function resetTheme() {
+  const r = document.documentElement.style;
+  THEME_VARS.forEach(v => r.removeProperty(v));
+  themeMeta()?.setAttribute('content', '#0d3b2a');
+}
+function applyTheme(t) {
+  if (!t || !t.main || !t.accent || !t.pinnie) t = DEFAULT_THEME;
+  const isDefault = t.main === DEFAULT_THEME.main && t.accent === DEFAULT_THEME.accent && t.pinnie === DEFAULT_THEME.pinnie;
+  if (isDefault) return resetTheme(); // keeps the hand-tuned dark-mode greens
+  const r = document.documentElement.style;
+  const pitch = shade(t.main, 0.62);
+  r.setProperty('--grass', t.main);
+  r.setProperty('--pitch', pitch);
+  r.setProperty('--pitch-2', shade(t.main, 0.38));
+  r.setProperty('--lime', t.accent);
+  r.setProperty('--pinnie', t.pinnie);
+  r.setProperty('--on-primary', textOn(t.main));
+  r.setProperty('--on-accent', textOn(t.accent));
+  r.setProperty('--on-pinnie', textOn(t.pinnie));
+  // highlight text drawn on the dark header: fall back to white if the highlight is too dark to read
+  r.setProperty('--accent-on-dark', luminance(t.accent) > 0.2 ? t.accent : '#ffffff');
+  themeMeta()?.setAttribute('content', pitch);
+}
+const chipsHtml = t => `<span class="chips"><span style="background:${shade(t.main, 0.62)}"></span><span style="background:${t.main}"></span><span style="background:${t.accent}"></span><span style="background:${t.pinnie}"></span></span>`;
+
+function themeFields(cur) {
+  cur = cur && cur.main ? cur : DEFAULT_THEME;
+  const custom = !THEMES.some(t => t.id === cur.preset);
+  return `<div class="full">
+    <label>Colors</label>
+    <div class="swatches" id="themeSw">
+      ${THEMES.map(t => `<button type="button" class="swatch" data-theme="${t.id}" aria-pressed="${!custom && cur.preset === t.id}">${chipsHtml(t)}${t.name}</button>`).join('')}
+      <button type="button" class="swatch" data-theme="custom" aria-pressed="${custom}"><span id="customChips">${chipsHtml(cur)}</span>Custom</button>
+    </div>
+    <div class="color-row">
+      <div><label for="c_main">Main</label><input type="color" id="c_main" value="${cur.main}"></div>
+      <div><label for="c_accent">Highlight</label><input type="color" id="c_accent" value="${cur.accent}"></div>
+      <div><label for="c_pinnie">Pinnies</label><input type="color" id="c_pinnie" value="${cur.pinnie}"></div>
+    </div>
+    <div class="field-hint">Pick a scheme or set your own — tip: match "Pinnies" to your real bibs. Everyone's screen updates when you save.</div>
+  </div>`;
+}
+function readTheme(root) {
+  const pressed = $('#themeSw [aria-pressed=true]', root);
+  return { preset: pressed ? pressed.dataset.theme : 'custom', main: $('#c_main', root).value, accent: $('#c_accent', root).value, pinnie: $('#c_pinnie', root).value };
+}
+function wireTheme(root) {
+  const sw = $('#themeSw', root);
+  if (!sw) return;
+  const press = id => $$('[data-theme]', sw).forEach(b => b.setAttribute('aria-pressed', b.dataset.theme === id));
+  const preview = () => { const t = readTheme(root); $('#customChips', root).innerHTML = chipsHtml(t); applyTheme(t); };
+  $$('[data-theme]', sw).forEach(b => b.onclick = () => {
+    const t = THEMES.find(x => x.id === b.dataset.theme);
+    if (t) { $('#c_main', root).value = t.main; $('#c_accent', root).value = t.accent; $('#c_pinnie', root).value = t.pinnie; }
+    press(b.dataset.theme);
+    preview();
+  });
+  for (const id of ['c_main', 'c_accent', 'c_pinnie']) $('#' + id, root).addEventListener('input', () => { press('custom'); preview(); });
+}
 let view = null;          // current view's cleanup handle
 let live = null;          // { state, offset } for timers
 
@@ -72,8 +154,10 @@ function beep() {
     });
   } catch {}
 }
+let quiet = false; // true when this person turned alerts off: banner only, no beep/buzz
 function onNotice(n) {
   toast(n.title + (n.body ? ' — ' + n.body : ''), 'alert', 7000);
+  if (quiet) return;
   beep();
   try { navigator.vibrate?.([200, 100, 200]); } catch {}
 }
@@ -120,8 +204,11 @@ async function enablePush(postUrl, headers) {
   await api('POST', postUrl, { subscription: sub.toJSON() }, headers);
 }
 
-function alertBar(enabled, actId) {
-  if (enabled) return `<div class="alertbar ok"><span>🔔 Game alerts are on for this phone</span></div>`;
+// Always-visible alerts banner with Turn on / Turn off.
+function alertBar(enabled, onAct, offAct, what = 'your game is up') {
+  if (enabled) {
+    return `<div class="alertbar ok"><span>🔔 <b>Alerts are on</b> — we'll notify this phone when ${what}.</span><button class="btn small" data-act="${offAct}">Turn off</button></div>`;
+  }
   if (!pushSupported) {
     if (isIOS && !isStandalone) {
       return `<div class="alertbar"><span><b>Get buzzed when you're up:</b> tap the Share button <span aria-hidden="true">⬆️</span> then <b>Add to Home Screen</b>, open Next Up from there and turn on alerts.</span></div>`;
@@ -131,7 +218,7 @@ function alertBar(enabled, actId) {
   if (Notification.permission === 'denied') {
     return `<div class="alertbar bad"><span>Notifications are blocked for this site. Allow them in your browser settings to get game alerts.</span></div>`;
   }
-  return `<div class="alertbar"><span><b>Turn on alerts</b> so your phone buzzes when your game is up — even with the screen locked.</span><button class="btn lime small" data-act="${actId}">Turn on</button></div>`;
+  return `<div class="alertbar"><span>🔕 <b>Alerts are off.</b> Turn them on to get a buzz when ${what} — even with the screen locked.</span><button class="btn lime small" data-act="${onAct}">Turn on</button></div>`;
 }
 
 /* ---------------- timers ---------------- */
@@ -283,7 +370,7 @@ function boardHtml(s, g, opts) {
 
 function limitText(s) {
   const st = s.settings;
-  const boards = st.maxBoards === null ? 'Unlimited line' : `${s.games.length} of ${st.maxBoards} boards in use`;
+  const boards = st.maxBoards === null ? 'Unlimited line' : `${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''} in the line`;
   const signups = st.maxSignups === null ? 'unlimited sign-ups' : `${st.maxSignups} game${st.maxSignups > 1 ? 's' : ''} per person at a time`;
   return `<b>${st.playersPerTeam}v${st.playersPerTeam}</b> · ${st.gameMinutes} min games · ${boards} · ${signups}`;
 }
@@ -300,15 +387,15 @@ function homeView(prefill = '') {
     <section class="card hero">
       <h1>Who's up next?</h1>
       <p>Put your name down for a game and get a buzz on your phone when it's your turn. No account needed.</p>
-      <form id="joinForm" class="stack" autocomplete="off">
+      <form id="joinForm" class="stack" autocomplete="off" novalidate>
         <div id="stepCode">
           <label for="code">Event code</label>
-          <input id="code" class="code-input" inputmode="text" autocapitalize="none" spellcheck="false" maxlength="32" placeholder="0000" value="${esc(prefill)}" required>
+          <input id="code" class="code-input" inputmode="text" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="32" placeholder="0000" value="${esc(prefill)}">
         </div>
         <div id="stepName" class="hidden">
-          <div class="small" style="color:#cfe3d8;margin-bottom:8px">Joining <b id="evName" style="color:#fff"></b></div>
+          <div class="small" style="color:#cfe3d8;margin-bottom:8px">Joining <b id="evName" style="color:#fff"></b> · <a href="#/" id="changeCode" style="color:#c6f24e">change code</a></div>
           <label for="name">Your name</label>
-          <input id="name" maxlength="24" autocomplete="nickname" placeholder="e.g. Sam R." required>
+          <input id="name" maxlength="24" autocomplete="nickname" placeholder="e.g. Sam R.">
         </div>
         <button class="btn lime block" id="joinBtn" type="submit">Continue</button>
         <p class="err" id="joinErr" style="color:#ffb4ad"></p>
@@ -325,13 +412,17 @@ function homeView(prefill = '') {
     try {
       const code = $('#code').value.trim();
       if (!found) {
+        if (!code) throw new Error('Enter the event code');
         found = await api('POST', '/api/join', { code, checkOnly: true });
+        // This phone already joined this event: go straight to the board.
+        if (playerSession(found.eventId)) { location.hash = '#/e/' + found.eventId; return; }
         $('#evName').textContent = found.name;
         $('#stepCode').classList.add('hidden');
         $('#stepName').classList.remove('hidden');
         btn.textContent = "I'm in";
         $('#name').focus();
       } else {
+        if (!$('#name').value.trim()) throw new Error('Enter your name');
         const r = await api('POST', '/api/join', { code, name: $('#name').value });
         store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name });
         store.set('nu.lastEvent', r.eventId);
@@ -339,6 +430,15 @@ function homeView(prefill = '') {
       }
     } catch (ex) { err.textContent = ex.message; }
     btn.disabled = false;
+  };
+  $('#changeCode').onclick = e => {
+    e.preventDefault();
+    found = null;
+    $('#stepName').classList.add('hidden');
+    $('#stepCode').classList.remove('hidden');
+    $('#joinBtn').textContent = 'Continue';
+    $('#joinErr').textContent = '';
+    $('#code').focus();
   };
   if (prefill) setTimeout(() => form.requestSubmit(), 0);
   else $('#code').focus();
@@ -384,8 +484,10 @@ async function playerView(eventId) {
   });
   const refresher = setInterval(render, 15000); // keeps wait estimates fresh
 
-  // Quietly re-register this phone for push if permission is already granted.
-  if (pushSupported && Notification.permission === 'granted' && !me.alerts) {
+  quiet = !!me.alertsOff;
+  // Quietly re-register this phone for push if permission is already granted —
+  // unless the person turned alerts off on purpose.
+  if (pushSupported && Notification.permission === 'granted' && !me.alerts && !me.alertsOff) {
     enablePush(`/api/events/${eventId}/push`, { 'X-Player-Token': sess.token })
       .then(() => { me.alerts = true; render(); }).catch(() => {});
   }
@@ -403,8 +505,13 @@ async function playerView(eventId) {
       } else if (a === 'alerts') {
         el.disabled = true;
         await enablePush(`/api/events/${eventId}/push`, { 'X-Player-Token': sess.token });
-        me.alerts = true; render();
+        me.alerts = true; me.alertsOff = false; quiet = false; render();
         toast('Alerts on — you should get a test notification now');
+      } else if (a === 'alerts-off') {
+        el.disabled = true;
+        await papi(eventId, 'POST', `/api/events/${eventId}/push/off`);
+        me.alerts = false; me.alertsOff = true; quiet = true; render();
+        toast("Alerts off — you won't get notifications. You can turn them back on any time.");
       } else if (a === 'signout') {
         if (!confirm('Sign out? Your name will be taken off any games that haven\'t started.')) return;
         await papi(eventId, 'POST', `/api/events/${eventId}/signout`).catch(() => {});
@@ -423,6 +530,7 @@ async function playerView(eventId) {
 
 function renderPlayer(s, me) {
   const st = s.settings;
+  applyTheme(st.theme);
   if (s.status !== 'active') {
     app.innerHTML = `<div class="card"><h2>${esc(s.name)}</h2><p class="muted">This event has ended. Thanks for playing!</p><a class="btn" href="#/" data-act="signout">Back home</a></div>`;
     return;
@@ -473,19 +581,19 @@ function renderPlayer(s, me) {
     else footer = `<button class="btn primary block" data-act="join" data-gid="${g.id}">Put my name down</button>`;
     return boardHtml(s, g, { meId: me.id, idx, footer });
   }).join('')}</div>`
-    : `<div class="empty">All ${st.maxBoards} boards are taken. A new one opens when the current game finishes.</div>`;
+    : `<div class="empty">No games waiting right now.</div>`;
 
-  const atLimit = st.maxBoards !== null && s.games.length >= st.maxBoards && !open.some(g => g.teams.a.length + g.teams.b.length < st.playersPerTeam * 2);
+  const atLimit = st.maxBoards !== null && !open.some(g => g.teams.a.length + g.teams.b.length < st.playersPerTeam * 2);
 
   app.innerHTML = `
-    ${alertBar(me.alerts, 'alerts')}
+    ${alertBar(me.alerts, 'alerts', 'alerts-off')}
     ${status}
     <div class="meta-row"><span>${esc(s.name)}</span><span>${limitText(s)}</span>${st.maxSignups !== null ? `<span>You: <b>${mySignups.length}/${st.maxSignups}</b></span>` : ''}</div>
     <h2 class="section-title">On the field</h2>
     ${playingHtml}
     <h2 class="section-title">The line <button class="btn small ghost" data-act="share">Invite · code ${esc(s.code)}</button></h2>
     ${queueHtml}
-    ${atLimit && open.length ? `<p class="muted small" style="margin-top:10px">Every board is full. A new one opens when a game finishes.</p>` : ''}
+    ${atLimit && open.length ? `<p class="muted small" style="margin-top:10px">Every board is full. A new board opens as soon as the next game starts.</p>` : ''}
   `;
 }
 
@@ -551,7 +659,7 @@ function settingsFields(st, withCode) {
     </div>` : ''}
     ${num('s_ppt', 'Players per team', st.playersPerTeam, 1, 30, 'e.g. 5 = 5v5, 10 names per game')}
     ${num('s_min', 'Game length (minutes)', st.gameMinutes, 1, 180)}
-    ${unl('s_boards', 'Boards (games on the list)', st.maxBoards, 50, 'Like whiteboards: how many games can be listed at once')}
+    ${unl('s_boards', 'Boards in the line', st.maxBoards, 50, "Like whiteboards: waiting games shown at once. The game on the field doesn't count.")}
     ${unl('s_signups', 'Sign-ups per person', st.maxSignups, 50, 'How many games one person can be on at a time')}
     ${num('s_fields', 'Games at the same time', st.fields, 1, 10, 'Number of fields in use')}
     ${num('s_warn', 'Heads-up alert (min before end)', st.warnMinutes, 0, 30, '0 = off. Pings the next game to get ready')}
@@ -560,9 +668,11 @@ function settingsFields(st, withCode) {
     <div class="full stack">
       <label class="check"><input type="checkbox" id="s_pick" ${st.allowTeamPick ? 'checked' : ''}> Players choose their own team</label>
       <label class="check"><input type="checkbox" id="s_leave" ${st.allowLeave ? 'checked' : ''}> Players can take their own name off a game</label>
-    </div>`;
+    </div>
+    ${themeFields(st.theme)}`;
 }
 function wireSettings(root) {
+  wireTheme(root);
   for (const id of ['s_boards', 's_signups']) {
     const box = $('#' + id + 'Unl', root), inp = $('#' + id, root);
     box.onchange = () => { inp.disabled = box.checked; if (!box.checked && !inp.value) inp.value = id === 's_boards' ? 3 : 1; };
@@ -590,7 +700,8 @@ function readSettings(root) {
     warnMinutes: n('s_warn'),
     defaultPinnies: $('#s_pin', root).value,
     allowTeamPick: $('#s_pick', root).checked,
-    allowLeave: $('#s_leave', root).checked
+    allowLeave: $('#s_leave', root).checked,
+    theme: readTheme(root)
   };
 }
 const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, fields: 1, warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: false, allowLeave: true };
@@ -707,6 +818,10 @@ async function managerEventView(eventId) {
           el.disabled = true;
           await enablePush(`${base}/push`, { Authorization: 'Bearer ' + sess.token });
           toast("You'll get an alert when a game's time is up"); break;
+        case 'mgr-alerts-off':
+          el.disabled = true;
+          await mapi('POST', `${base}/push/off`);
+          toast('Organizer alerts off'); break;
         case 'share': shareJoin(s.code); break;
         case 'newpin':
           if (!confirm('Make a new 4-digit code? The old one stops working (people already in stay in).')) return;
@@ -759,11 +874,13 @@ async function managerEventView(eventId) {
       ev.preventDefault();
       try {
         const settings = readSettings(dlg);
-        await mapi('PATCH', base, { name: $('#s_name', dlg).value, settings });
+        const updated = await mapi('PATCH', base, { name: $('#s_name', dlg).value, settings });
+        live.state = updated;
         store.set('nu.lastSettings', settings);
-        dlg.close(); toast('Settings saved');
+        dlg.close(); toast('Settings saved — everyone sees the changes now');
       } catch (ex) { toast(ex.message, 'warn'); }
     };
+    dlg.onclose = () => { if (live) { applyTheme(live.state.settings.theme); render(); } };
     dlg.showModal();
   }
 
@@ -772,9 +889,10 @@ async function managerEventView(eventId) {
 
 function renderManager(s) {
   const st = s.settings;
+  if (!dlg.open) applyTheme(st.theme); // don't override a live preview in Settings
   const playing = s.games.filter(g => g.status === 'playing');
   const open = s.games.filter(g => g.status === 'open');
-  const atLimit = st.maxBoards !== null && s.games.length >= st.maxBoards;
+  const fixedBoards = st.maxBoards !== null;
 
   if (s.status !== 'active') {
     app.innerHTML = `<div class="card"><h2>${esc(s.name)}</h2><p class="muted">This event has ended. ${s.history.length} games were played.</p>
@@ -834,17 +952,17 @@ function renderManager(s) {
         ${qr ? `<div class="qr" aria-label="QR code to join">${qr}</div>` : ''}
       </div>
     </section>
-    ${s.managerAlerts ? '' : `<div class="alertbar"><span>Get a buzz on <b>your</b> phone when a game's time is up.</span><button class="btn lime small" data-act="mgr-alerts">Turn on</button></div>`}
+    ${alertBar(s.managerAlerts > 0, 'mgr-alerts', 'mgr-alerts-off', "a game's time is up")}
     <div class="meta-row"><span>${limitText(s)}</span></div>
 
     <h2 class="section-title">On the field</h2>
     <div class="boards">${playingHtml}</div>
 
     <h2 class="section-title">The line
-      <button class="btn small" data-act="add-game" ${atLimit ? 'disabled title="Board limit reached"' : ''}>+ Add game</button>
+      ${fixedBoards ? `<span class="muted small" style="text-transform:none;font-family:var(--font)">${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''}</span>` : '<button class="btn small" data-act="add-game">+ Add game</button>'}
     </h2>
     <div class="boards">${queueHtml}</div>
-    ${atLimit ? `<p class="muted small" style="margin-top:8px">All ${st.maxBoards} boards in use. A fresh board opens when you end a game.</p>` : ''}
+    ${fixedBoards ? `<p class="muted small" style="margin-top:8px">The line always shows ${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''}. When you start a game it moves to the field and a fresh empty board is added. Change the number in Settings.</p>` : ''}
 
     <h2 class="section-title">Players (${s.roster.length}) <span class="muted small" style="text-transform:none;font-family:var(--font)">${withAlerts} with alerts on</span></h2>
     <section class="card">
@@ -880,6 +998,7 @@ function qrSvg(text) {
 /* ================================================================== */
 function route() {
   if (view) { view.cleanup(); view = null; }
+  resetTheme();
   if (dlg.open) dlg.close();
   const h = location.hash.replace(/^#/, '') || '/';
   let m;

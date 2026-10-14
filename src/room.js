@@ -10,8 +10,10 @@ const PUSH_BATCH = 40; // stay under the free plan's 50 outgoing requests per ru
 
 const DEFAULT_SETTINGS = {
   playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, fields: 1,
-  warnMinutes: 2, allowTeamPick: false, allowLeave: true, defaultPinnies: 'a'
+  warnMinutes: 2, allowTeamPick: false, allowLeave: true, defaultPinnies: 'a',
+  theme: { preset: 'pitch', main: '#1f8a5b', accent: '#c6f24e', pinnie: '#ff7a1a' }
 };
+const hexColor = v => (/^#[0-9a-fA-F]{6}$/.test(String(v || '')) ? String(v).toLowerCase() : undefined);
 
 function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
   const s = { ...DEFAULT_SETTINGS, ...base };
@@ -30,6 +32,13 @@ function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
   if ('allowTeamPick' in input) s.allowTeamPick = !!input.allowTeamPick;
   if ('allowLeave' in input) s.allowLeave = !!input.allowLeave;
   if (input.defaultPinnies === 'a' || input.defaultPinnies === 'b') s.defaultPinnies = input.defaultPinnies;
+  if (input.theme && typeof input.theme === 'object') {
+    const t = {
+      preset: String(input.theme.preset || 'custom').replace(/[^a-z0-9-]/gi, '').slice(0, 20) || 'custom',
+      main: hexColor(input.theme.main), accent: hexColor(input.theme.accent), pinnie: hexColor(input.theme.pinnie)
+    };
+    if (t.main && t.accent && t.pinnie) s.theme = t;
+  }
   return s;
 }
 
@@ -52,11 +61,24 @@ function newGame(ev) {
     warned: false, timeUp: false, notifiedNext: [], createdAt: Date.now()
   };
 }
-// Keep one board with space, unless the board limit is reached.
+// Keep the waiting line stocked. Games being played don't count.
+// - Board limit N: always exactly N waiting boards (empty ones are added automatically;
+//   if the limit is lowered, extra EMPTY boards at the end are removed).
+// - Unlimited: always at least one waiting board with space.
 function ensureOpenBoard(ev) {
-  if (openGames(ev).some(g => !isFull(ev, g))) return;
-  if (ev.settings.maxBoards !== null && ev.games.length >= ev.settings.maxBoards) return;
-  ev.games.push(newGame(ev));
+  const max = ev.settings.maxBoards;
+  if (max === null) {
+    if (!openGames(ev).some(g => !isFull(ev, g))) ev.games.push(newGame(ev));
+    return;
+  }
+  while (openGames(ev).length < max) ev.games.push(newGame(ev));
+  let open = openGames(ev);
+  for (let i = open.length - 1; i >= 0 && open.length > max; i--) {
+    if (gamePlayers(open[i]).length === 0) {
+      ev.games = ev.games.filter(g => g !== open[i]);
+      open = openGames(ev);
+    }
+  }
 }
 function pickTeam(ev, g, wanted) {
   const cap = teamCap(ev);
@@ -339,13 +361,21 @@ export class EventRoom extends DurableObject {
       if (!p) fail(401, "You're not signed in to this event anymore");
 
       if (method === 'GET' && path === '/p/me') {
-        return { player: { id: p.id, name: p.name, alerts: p.subs.length > 0 }, state: this.publicState() };
+        return { player: { id: p.id, name: p.name, alerts: p.subs.length > 0, alertsOff: !!p.alertsOff }, state: this.publicState() };
+      }
+      if (method === 'POST' && path === '/p/push/off') {
+        p.subs = [];
+        p.alertsOff = true;
+        if (ev.pq) ev.pq = ev.pq.filter(item => item.to !== p.id);
+        await this.commit();
+        return { ok: true };
       }
       if (method === 'POST' && path === '/p/push') {
         const sub = b.subscription;
         if (!sub || !sub.endpoint || !sub.keys) fail(400, 'Missing push subscription');
         for (const other of Object.values(ev.players)) other.subs = other.subs.filter(s => s.endpoint !== sub.endpoint);
         p.subs.push({ endpoint: sub.endpoint, keys: sub.keys });
+        p.alertsOff = false;
         this.queuePush([sub], { title: `You're signed in as ${p.name}`, body: `We'll ping you here when your game at ${ev.name} is up.`, tag: 'nextup-' + ev.id, url: `/#/e/${ev.id}` }, p.id);
         await this.commit();
         return { ok: true };
@@ -455,6 +485,13 @@ export class EventRoom extends DurableObject {
         return { ok: true, code: ev.code };
       }
 
+      if (method === 'POST' && path === '/m/push/off') {
+        ev.managerSubs = [];
+        if (ev.pq) ev.pq = ev.pq.filter(item => item.to !== 'm');
+        await this.commit();
+        return { ok: true };
+      }
+
       if (method === 'POST' && path === '/m/push') {
         const sub = b.subscription;
         if (!sub || !sub.endpoint || !sub.keys) fail(400, 'Missing push subscription');
@@ -476,8 +513,8 @@ export class EventRoom extends DurableObject {
 
       if (method === 'POST' && path === '/m/games') {
         live();
-        if (ev.settings.maxBoards !== null && ev.games.length >= ev.settings.maxBoards) {
-          fail(409, `All ${ev.settings.maxBoards} boards are in use. Raise the board limit in settings or finish a game.`);
+        if (ev.settings.maxBoards !== null && openGames(ev).length >= ev.settings.maxBoards) {
+          fail(409, `The line already has ${ev.settings.maxBoards} boards. Raise the board count in settings to add more.`);
         }
         ev.games.push(newGame(ev));
         await this.commit();
@@ -563,6 +600,7 @@ export class EventRoom extends DurableObject {
         g.timer = { durationMs: ms, remainingMs: ms, endsAt: Date.now() + ms, running: true };
         g.warned = false; g.timeUp = false;
         ev.games = [...playingGames(ev), ...openGames(ev)];
+        ensureOpenBoard(ev); // the game left the line, so a fresh board takes its place
         for (const team of ['a', 'b']) for (const pid of g.teams[team]) {
           this.notifyPlayer(pid, `Game ${g.number} is on!`, `You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id);
         }
