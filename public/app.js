@@ -915,7 +915,7 @@ function readSettings(root) {
 }
 const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, fields: 1, warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: false, allowLeave: true };
 
-async function managerHomeView() {
+async function managerHomeView({ startNew = false } = {}) {
   app.innerHTML = '<div class="spinner"></div>';
   let me;
   try { me = await mapi('GET', '/api/manager/me'); }
@@ -948,8 +948,10 @@ async function managerHomeView() {
         <p class="err" id="newErr"></p>
       </form>
     </section>`;
+  const goNew = () => { $('#newEvCard').scrollIntoView({ behavior: 'smooth' }); setTimeout(() => $('#evname').focus({ preventScroll: true }), 400); };
   const jump = $('#jumpNew');
-  if (jump) jump.onclick = e => { e.preventDefault(); $('#newEvCard').scrollIntoView({ behavior: 'smooth' }); setTimeout(() => $('#evname').focus({ preventScroll: true }), 400); };
+  if (jump) jump.onclick = e => { e.preventDefault(); goNew(); };
+  if (startNew) { history.replaceState(null, '', '#/manager'); setTimeout(goNew, 50); }
 
   const form = $('#newEv');
   wireSettings(form);
@@ -1124,8 +1126,28 @@ function renderManager(s) {
   const fixedBoards = st.maxBoards !== null;
 
   if (s.status !== 'active') {
-    app.innerHTML = `<div class="card"><h2>${esc(s.name)}</h2><p class="muted">This event has ended. ${s.history.length} games were played.</p>
-      <div class="row"><button class="btn primary" data-act="reopen">Reopen event</button><button class="btn danger" data-act="delete-event">Delete</button></div></div>`;
+    const players = s.roster.length;
+    app.innerHTML = `<section class="card ended-card">
+        <div class="pill ended">Ended</div>
+        <h2 style="margin-top:10px">${esc(s.name)}</h2>
+        <p class="muted" style="margin:0 0 4px">This event is over and saved in your events.</p>
+        <div class="ended-stats">
+          <div><b>${s.history.length}</b><span>game${s.history.length === 1 ? '' : 's'} played</span></div>
+          <div><b>${players}</b><span>player${players === 1 ? '' : 's'}</span></div>
+        </div>
+        <div class="stack">
+          <a class="btn primary block" href="#/manager">← Back to all events</a>
+          <a class="btn block" href="#/manager/new">+ Start a new event</a>
+        </div>
+      </section>
+      <details class="more card">
+        <summary>More options</summary>
+        <p class="muted small">Ended this by mistake? Reopen it to let people join and sign up again. Deleting removes it from your events for good.</p>
+        <div class="row">
+          <button class="btn small" data-act="reopen">Reopen event</button>
+          <button class="btn small danger" data-act="delete-event">Delete event</button>
+        </div>
+      </details>`;
     return;
   }
 
@@ -1255,6 +1277,7 @@ function route() {
   if ((m = h.match(/^\/install\/(.+)$/))) return installView(decodeURIComponent(m[1]));
   if ((m = h.match(/^\/manager\/e\/([\w-]+)$/))) return mgrSession() ? managerEventView(m[1]) : managerAuthView();
   if (h === '/manager') return mgrSession() ? managerHomeView() : managerAuthView();
+  if (h === '/manager/new') return mgrSession() ? managerHomeView({ startNew: true }) : managerAuthView();
   return homeView();
 }
 

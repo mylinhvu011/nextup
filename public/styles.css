@@ -381,3 +381,14 @@ dialog .dlg-foot { padding: 12px 16px; border-top: 1px solid var(--line); displa
 dialog.ask { width: min(420px, calc(100% - 32px)); }
 .ask-msg { margin: 0; font-size: 16px; line-height: 1.45; white-space: pre-line; }
 .ask-input { margin-top: 12px; }
+
+/* ---------- ended event ---------- */
+.ended-card h2 { font-size: 28px; }
+.ended-stats { display: flex; gap: 10px; margin: 14px 0 16px; }
+.ended-stats > div { flex: 1; background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.ended-stats b { display: block; font: 800 30px/1 var(--display); }
+.ended-stats span { font-size: 13px; color: var(--ink-2); }
+details.more.card { padding: 12px 16px; }
+details.more summary { margin: 0; }
+details.more[open] summary { margin-bottom: 8px; }
+.ended-card .pill { display: inline-block; }
