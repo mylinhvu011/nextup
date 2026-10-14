@@ -135,7 +135,26 @@ export class Registry extends DurableObject {
     const c = normCode(code);
     if (!c) return err(400, 'Enter the event code');
     const eventId = await this.ctx.storage.get('c:' + c);
-    if (!eventId) return err(404, 'No live event with that code — check with the organizer');
-    return { eventId };
+    if (eventId) return { eventId };
+    // Move codes carry someone's sign-in from their browser into the Home Screen app.
+    const mv = await this.ctx.storage.get('mv:' + c);
+    if (mv && mv.exp > Date.now()) return { eventId: mv.eventId, moveCode: c };
+    if (mv) await this.ctx.storage.delete('mv:' + c);
+    return err(404, 'No live event with that code — check with the organizer');
   }
+
+  /* ---------- move codes ---------- */
+  async reserveMove(eventId, ttlMs) {
+    const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789'; // no look-alikes (0/o, 1/l/i)
+    for (let i = 0; i < 50; i++) {
+      const bytes = crypto.getRandomValues(new Uint8Array(6));
+      const code = [...bytes].map(b => alphabet[b % alphabet.length]).join('');
+      if (await this.ctx.storage.get('c:' + code)) continue;
+      if (await this.ctx.storage.get('mv:' + code)) continue;
+      await this.ctx.storage.put('mv:' + code, { eventId, exp: Date.now() + ttlMs });
+      return { code };
+    }
+    return err(503, 'Could not make a move code — try again');
+  }
+  async releaseMove(code) { await this.ctx.storage.delete('mv:' + normCode(code)); return true; }
 }

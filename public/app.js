@@ -167,6 +167,154 @@ const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platfo
 const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 
+/* ---------------- install as an app (Home Screen) ---------------- */
+const UA = navigator.userAgent;
+const isAndroid = /android/i.test(UA);
+const isMobile = isIOS || isAndroid;
+const iosBrowser = !isIOS ? null : /CriOS/.test(UA) ? 'chrome' : /FxiOS/.test(UA) ? 'firefox' : /EdgiOS/.test(UA) ? 'edge' : 'safari';
+const isSamsung = /SamsungBrowser/i.test(UA);
+let installPrompt = null; // Android / desktop Chrome & Edge offer a one-tap install
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  installPrompt = e;
+  $$('[data-install]').forEach(b => b.classList.remove('hidden'));
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  $$('[data-install]').forEach(b => b.classList.add('hidden'));
+  toast('Installed! Open Next Up from your Home Screen.', 'alert', 7000);
+});
+async function promptInstall() {
+  if (!installPrompt) return false;
+  installPrompt.prompt();
+  const choice = await installPrompt.userChoice.catch(() => null);
+  installPrompt = null;
+  $$('[data-install]').forEach(b => b.classList.add('hidden'));
+  return choice && choice.outcome === 'accepted';
+}
+document.addEventListener('click', e => {
+  if (e.target.closest('[data-install]')) { e.preventDefault(); promptInstall(); }
+});
+const installBtn = (label = 'Add to Home Screen') =>
+  `<button type="button" class="btn lime small ${installPrompt ? '' : 'hidden'}" data-install>📲 ${label}</button>`;
+
+// "Get it as an app first" card shown before joining (only on phones, only in the browser).
+function installNudge(code, who = 'player') {
+  if (isStandalone || !isMobile) return '';
+  const why = who === 'organizer'
+    ? "so your phone buzzes when a game's time is up"
+    : 'so your phone buzzes when your game is up';
+  const ios = isIOS ? ' On iPhone, alerts only work from the Home Screen app.' : '';
+  return `<div class="nudge">
+    <div class="nudge-text"><b>📲 Get it as an app first</b>
+      <span>Add Next Up to your Home Screen, then join from there ${why}.${ios} Takes about 20 seconds.</span></div>
+    <div class="row">${installBtn()}<a class="btn small" href="#/install${code ? '/' + encodeURIComponent(code) : ''}">Show me how</a></div>
+  </div>`;
+}
+
+function iosSteps() {
+  if (iosBrowser && iosBrowser !== 'safari') {
+    return `<ol class="steps">
+      <li>Tap the <b>Share</b> button <span class="key">⬆︎</span> in the address bar (top right).</li>
+      <li>Tap <b>Add to Home Screen</b>.</li>
+      <li>Tap <b>Add</b>.</li>
+    </ol>
+    <p class="small muted">Don't see it? Open this page in <b>Safari</b> instead — copy the link and paste it into Safari.</p>`;
+  }
+  return `<ol class="steps">
+    <li>Tap the <b>Share</b> button <span class="key">⬆︎</span>. On iOS 26 it's inside the <span class="key">•••</span> menu at the bottom right; on older iPhones it's at the bottom of the screen.</li>
+    <li>Scroll down and tap <b>Add to Home Screen</b> (tap <b>View More</b> if you don't see it).</li>
+    <li>Make sure <b>Open as Web App</b> is on, then tap <b>Add</b>.</li>
+  </ol>
+  <p class="small muted">Needs iOS 16.4 or newer for alerts.</p>`;
+}
+function androidSteps() {
+  if (isSamsung) {
+    return `<ol class="steps">
+      <li>Tap the menu <span class="key">≡</span> at the bottom right.</li>
+      <li>Tap <b>Add page to</b> → <b>Home screen</b>.</li>
+      <li>Tap <b>Add</b>.</li>
+    </ol>`;
+  }
+  return `<ol class="steps">
+    <li>Tap the menu <span class="key">⋮</span> at the top right of Chrome.</li>
+    <li>Tap <b>Add to Home screen</b> (or <b>Install app</b>).</li>
+    <li>Tap <b>Install</b>.</li>
+  </ol>`;
+}
+function desktopSteps() {
+  return `<ol class="steps">
+    <li>In Chrome or Edge, click the install icon <span class="key">⊕</span> at the right end of the address bar.</li>
+    <li>Click <b>Install</b>.</li>
+  </ol>
+  <p class="small muted">On a computer you can also just keep this tab open — alerts work in the browser.</p>`;
+}
+
+function installView(code = '') {
+  topnav.innerHTML = `<a href="${code ? '#/join/' + encodeURIComponent(code) : '#/'}">← Back</a>`;
+  const lastId = store.get('nu.lastEvent');
+  const sess = lastId && playerSession(lastId);
+  if (!code && sess && sess.eventCode) code = sess.eventCode;
+  const device = isIOS ? 'ios' : isAndroid ? 'android' : 'desktop';
+  const steps = { ios: iosSteps(), android: androidSteps(), desktop: desktopSteps() };
+  const tabs = [['ios', 'iPhone'], ['android', 'Android'], ['desktop', 'Computer']];
+
+  if (isStandalone) {
+    app.innerHTML = `<section class="card">
+      <h2>You're in the app ✓</h2>
+      <p class="muted">Next Up is on your Home Screen. Join your event, then tap <b>Turn on</b> in the alerts bar so your phone buzzes when you're up.</p>
+      <a class="btn primary block" href="${code ? '#/join/' + encodeURIComponent(code) : '#/'}">Join a game</a>
+    </section>`;
+    return;
+  }
+
+  app.innerHTML = `
+    <section class="card hero">
+      <h1>Get Next Up on your phone</h1>
+      <p>Add it to your Home Screen and it works like an app — with alerts that buzz your phone when your game is up, even with the screen locked. Free, nothing to download from an app store.</p>
+      <div class="row">${installBtn('Add to Home Screen now')}</div>
+    </section>
+
+    <section class="card">
+      <h2>1 · Add it to your Home Screen</h2>
+      <div class="seg" role="tablist" style="margin-bottom:12px">
+        ${tabs.map(([id, label]) => `<button type="button" data-dev="${id}" aria-pressed="${id === device}">${label}${id === device ? ' (this one)' : ''}</button>`).join('')}
+      </div>
+      <div id="devSteps">${steps[device]}</div>
+    </section>
+
+    <section class="card">
+      <h2>2 · Open it and join</h2>
+      <ol class="steps">
+        <li>Find the <b>Next Up</b> icon on your Home Screen and open it.</li>
+        <li>Enter ${code ? `the event code <span class="key big">${esc(code)}</span>` : 'the event code from the organizer'} and your name.</li>
+        <li>Tap <b>Turn on</b> in the alerts bar and allow notifications.</li>
+      </ol>
+    </section>
+
+    ${sess ? `<section class="card">
+      <h2>Already joined in this browser?</h2>
+      <p class="muted">${isIOS ? 'On iPhone the Home Screen app starts fresh, so it won\'t know you yet.' : 'If the app asks you to join again,'} Use a <b>move code</b> to bring your name and game spots with you — no new name needed.</p>
+      <div id="moveBox"><button class="btn primary" id="getMove">Get my move code</button></div>
+    </section>` : ''}
+
+    <p class="muted small" style="text-align:center">Prefer not to? <a href="${code ? '#/join/' + encodeURIComponent(code) : (sess ? '#/e/' + lastId : '#/')}">Continue in the browser</a> — you just won't get lock-screen alerts${isIOS ? ' on iPhone' : ''}.</p>`;
+
+  $$('[data-dev]').forEach(b => b.onclick = () => {
+    $$('[data-dev]').forEach(x => x.setAttribute('aria-pressed', x === b));
+    $('#devSteps').innerHTML = steps[b.dataset.dev];
+  });
+  const gm = $('#getMove');
+  if (gm) gm.onclick = async () => {
+    gm.disabled = true;
+    try {
+      const r = await papi(lastId, 'POST', `/api/events/${lastId}/move`);
+      $('#moveBox').innerHTML = `<div class="movecode">${esc(r.moveCode)}</div>
+        <p class="small muted">Open Next Up from your Home Screen and type this into the <b>Event code</b> box. It works once and expires in ${r.expiresInMin} minutes.</p>`;
+    } catch (e) { toast(e.message, 'warn'); gm.disabled = false; }
+  };
+}
+
 let swRegPromise = null;
 function getReg() {
   if (!('serviceWorker' in navigator)) return Promise.resolve(null);
@@ -209,10 +357,11 @@ function alertBar(enabled, onAct, offAct, what = 'your game is up') {
   if (enabled) {
     return `<div class="alertbar ok"><span>🔔 <b>Alerts are on</b> — we'll notify this phone when ${what}.</span><button class="btn small" data-act="${offAct}">Turn off</button></div>`;
   }
+  // iPhone/iPad in the browser: alerts only work from the Home Screen app.
+  if (isIOS && !isStandalone) {
+    return `<div class="alertbar"><span><b>Get buzzed when you're up:</b> on iPhone, alerts only work from the Home Screen app. Add it in 20 seconds — your name and spot come with you.</span><a class="btn lime small" href="#/install">Show me how</a></div>`;
+  }
   if (!pushSupported) {
-    if (isIOS && !isStandalone) {
-      return `<div class="alertbar"><span><b>Get buzzed when you're up:</b> tap the Share button <span aria-hidden="true">⬆️</span> then <b>Add to Home Screen</b>, open Next Up from there and turn on alerts.</span></div>`;
-    }
     return `<div class="alertbar bad"><span>This browser can't do push alerts. Keep this page open — it will beep and vibrate when you're up.</span></div>`;
   }
   if (Notification.permission === 'denied') {
@@ -370,7 +519,7 @@ function boardHtml(s, g, opts) {
 
 function limitText(s) {
   const st = s.settings;
-  const boards = st.maxBoards === null ? 'Unlimited line' : `${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''} in the line`;
+  const boards = s.closing ? 'Last call — no new boards' : st.maxBoards === null ? 'Unlimited line' : `${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''} in the line`;
   const signups = st.maxSignups === null ? 'unlimited sign-ups' : `${st.maxSignups} game${st.maxSignups > 1 ? 's' : ''} per person at a time`;
   return `<b>${st.playersPerTeam}v${st.playersPerTeam}</b> · ${st.gameMinutes} min games · ${boards} · ${signups}`;
 }
@@ -384,12 +533,13 @@ function homeView(prefill = '') {
   const last = lastId && playerSession(lastId);
   app.innerHTML = `
     ${last ? `<div class="card row"><div class="grow"><b>Welcome back, ${esc(last.name)}</b><div class="muted small">${esc(last.eventName || 'Your event')}</div></div><a class="btn primary" href="#/e/${esc(lastId)}">Open board</a></div>` : ''}
+    <div id="nudgeSlot">${installNudge(prefill)}</div>
     <section class="card hero">
       <h1>Who's up next?</h1>
       <p>Put your name down for a game and get a buzz on your phone when it's your turn. No account needed.</p>
       <form id="joinForm" class="stack" autocomplete="off" novalidate>
         <div id="stepCode">
-          <label for="code">Event code</label>
+          <label for="code">Event code${isStandalone ? ' <span style="font-weight:400">— or your move code</span>' : ''}</label>
           <input id="code" class="code-input" inputmode="text" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="32" placeholder="0000" value="${esc(prefill)}">
         </div>
         <div id="stepName" class="hidden">
@@ -416,6 +566,16 @@ function homeView(prefill = '') {
         found = await api('POST', '/api/join', { code, checkOnly: true });
         // This phone already joined this event: go straight to the board.
         if (playerSession(found.eventId)) { location.hash = '#/e/' + found.eventId; return; }
+        // Move code from the browser: sign in as the same person, no name needed.
+        if (found.moving) {
+          const r = await api('POST', '/api/join', { code });
+          store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name });
+          store.set('nu.lastEvent', r.eventId);
+          toast(`Welcome back, ${r.name} — your name and spot came with you`, 'alert', 6000);
+          location.hash = '#/e/' + r.eventId;
+          return;
+        }
+        $('#nudgeSlot').innerHTML = installNudge(code);
         $('#evName').textContent = found.name;
         $('#stepCode').classList.add('hidden');
         $('#stepName').classList.remove('hidden');
@@ -424,7 +584,7 @@ function homeView(prefill = '') {
       } else {
         if (!$('#name').value.trim()) throw new Error('Enter your name');
         const r = await api('POST', '/api/join', { code, name: $('#name').value });
-        store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name });
+        store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name, eventCode: code });
         store.set('nu.lastEvent', r.eventId);
         location.hash = '#/e/' + r.eventId;
       }
@@ -465,7 +625,7 @@ async function playerView(eventId) {
     return;
   }
   store.set('nu.lastEvent', eventId);
-  store.set('nu.player.' + eventId, { ...sess, name: me.name, eventName: state.name });
+  store.set('nu.player.' + eventId, { ...sess, name: me.name, eventName: state.name, eventCode: state.code });
   live = { state, offset: state.serverNow - Date.now() };
   topnav.innerHTML = `<span class="who">${esc(me.name)}</span><button data-act="signout">Sign out</button>`;
 
@@ -561,8 +721,12 @@ function renderPlayer(s, me) {
       <div class="muted small" style="text-align:right">Game ${g.number}</div>
       <div class="sub">${eta} · Team ${team === 'a' ? 1 : 2}${g.pinnies === team ? ' (pinnies)' : ''}</div></div>`;
   } else {
-    status = `<div class="card status"><div class="big">Not on a game yet</div><div></div>
-      <div class="sub">${limitHit ? 'You can sign up again once your game is played.' : 'Pick a game below and put your name down.'}</div></div>`;
+    const spotsLeft = open.some(g => g.teams.a.length + g.teams.b.length < st.playersPerTeam * 2);
+    const sub = s.closing
+      ? (spotsLeft && !limitHit ? 'Last call — grab an open spot below for one more game.' : 'No new games tonight. Thanks for playing!')
+      : (limitHit ? 'You can sign up again once your game is played.' : 'Pick a game below and put your name down.');
+    status = `<div class="card status"><div class="big">${s.closing && !playing.length && !open.length ? "That's a wrap" : 'Not on a game yet'}</div><div></div>
+      <div class="sub">${sub}</div></div>`;
   }
 
   const playingHtml = playing.length
@@ -581,12 +745,13 @@ function renderPlayer(s, me) {
     else footer = `<button class="btn primary block" data-act="join" data-gid="${g.id}">Put my name down</button>`;
     return boardHtml(s, g, { meId: me.id, idx, footer });
   }).join('')}</div>`
-    : `<div class="empty">No games waiting right now.</div>`;
+    : `<div class="empty">${s.closing ? 'No more games in the line — last call is on.' : 'No games waiting right now.'}</div>`;
 
-  const atLimit = st.maxBoards !== null && !open.some(g => g.teams.a.length + g.teams.b.length < st.playersPerTeam * 2);
+  const atLimit = !s.closing && st.maxBoards !== null && !open.some(g => g.teams.a.length + g.teams.b.length < st.playersPerTeam * 2);
 
   app.innerHTML = `
     ${alertBar(me.alerts, 'alerts', 'alerts-off')}
+    ${s.closing ? `<div class="lastcall"><b>🏁 Last call</b><span>No new games after the ones on the board. ${open.length ? `${open.length} game${open.length > 1 ? 's' : ''} left in the line.` : 'These are the final games.'}</span></div>` : ''}
     ${status}
     <div class="meta-row"><span>${esc(s.name)}</span><span>${limitText(s)}</span>${st.maxSignups !== null ? `<span>You: <b>${mySignups.length}/${st.maxSignups}</b></span>` : ''}</div>
     <h2 class="section-title">On the field</h2>
@@ -612,6 +777,7 @@ function managerAuthView() {
   let mode = 'login';
   const draw = () => {
     app.innerHTML = `
+      <div style="max-width:440px;margin:0 auto">${installNudge('', 'organizer')}</div>
       <section class="card" style="max-width:440px;margin:20px auto">
         <h2>Organizer</h2>
         <p class="muted small">Sign in to create events, run the line and manage games.</p>
@@ -715,18 +881,12 @@ async function managerHomeView() {
   $('#logout').onclick = async () => { await mapi('POST', '/api/manager/logout').catch(() => {}); store.del('nu.manager'); route(); };
 
   const saved = store.get('nu.lastSettings') || DEFAULTS;
+  // Live events first, then most recent
+  const events = me.events.slice().sort((a, b) => (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1) || b.createdAt - a.createdAt);
   app.innerHTML = `
-    <section class="card">
-      <h2>New event</h2>
-      <form id="newEv" class="stack">
-        <div><label for="evname">Event name</label><input id="evname" maxlength="60" placeholder="Tuesday night pickup" required></div>
-        <div class="settings-grid">${settingsFields(saved, true)}</div>
-        <button class="btn primary block" type="submit">Create event</button>
-        <p class="err" id="newErr"></p>
-      </form>
-    </section>
-    <h2 class="section-title">Your events</h2>
-    <div class="ev-list">${me.events.length ? me.events.map(e => `
+    <h2 class="section-title" style="margin-top:4px">Your events
+      ${events.length ? '<a class="btn small" href="#newEvCard" id="jumpNew">+ New event</a>' : ''}</h2>
+    <div class="ev-list">${events.length ? events.map(e => `
       <div class="card ev-item">
         <div class="grow">
           <h3>${esc(e.name)}</h3>
@@ -734,7 +894,19 @@ async function managerHomeView() {
         </div>
         <span class="pill ${e.status === 'active' ? '' : 'ended'}">${e.status === 'active' ? 'Live' : 'Ended'}</span>
         <a class="btn small" href="#/manager/e/${e.id}">Open</a>
-      </div>`).join('') : '<div class="empty">No events yet. Create one above.</div>'}</div>`;
+      </div>`).join('') : '<div class="empty">No events yet. Create your first one below.</div>'}</div>
+
+    <h2 class="section-title">Create an event</h2>
+    <section class="card" id="newEvCard">
+      <form id="newEv" class="stack">
+        <div><label for="evname">Event name</label><input id="evname" maxlength="60" placeholder="Tuesday night pickup" required></div>
+        <div class="settings-grid">${settingsFields(saved, true)}</div>
+        <button class="btn primary block" type="submit">Create event</button>
+        <p class="err" id="newErr"></p>
+      </form>
+    </section>`;
+  const jump = $('#jumpNew');
+  if (jump) jump.onclick = e => { e.preventDefault(); $('#newEvCard').scrollIntoView({ behavior: 'smooth' }); setTimeout(() => $('#evname').focus({ preventScroll: true }), 400); };
 
   const form = $('#newEv');
   wireSettings(form);
@@ -809,6 +981,13 @@ async function managerEventView(eventId) {
           if (!confirm(`Remove ${s.players[pid]?.name} from the event and all games?`)) return;
           await mapi('POST', `${base}/players/${pid}/remove`); break;
         case 'settings': openSettings(); break;
+        case 'lastcall':
+          if (!confirm('Turn on last call?\n\nNo new boards will be added. Games already on the board can still be played and people can still grab open spots on them. Everyone gets a "last call" notification.')) return;
+          await mapi('POST', `${base}/lastcall`, { on: true });
+          toast('Last call is on'); break;
+        case 'lastcall-off':
+          await mapi('POST', `${base}/lastcall`, { on: false });
+          toast('The line is open again'); break;
         case 'announce': {
           const msg = prompt('Message to everyone (sent as a notification):');
           if (msg && msg.trim()) { await mapi('POST', `${base}/announce`, { message: msg }); toast('Sent'); }
@@ -936,6 +1115,7 @@ function renderManager(s) {
         <div class="row">
           <button class="btn small" data-act="settings">⚙ Settings</button>
           <button class="btn small" data-act="announce">📣 Announce</button>
+          ${s.closing ? '' : '<button class="btn small" data-act="lastcall">🏁 Last call</button>'}
         </div>
       </div>
       <div class="joincard">
@@ -953,16 +1133,25 @@ function renderManager(s) {
       </div>
     </section>
     ${alertBar(s.managerAlerts > 0, 'mgr-alerts', 'mgr-alerts-off', "a game's time is up")}
+    ${s.closing ? `<div class="lastcall">
+        <div><b>🏁 Last call is on</b><span>${playing.length || open.length
+          ? `No new boards will be added. ${open.length} game${open.length === 1 ? '' : 's'} left in the line${playing.length ? ' plus the one on the field' : ''}.`
+          : "That's a wrap — every game has been played."}</span></div>
+        <div class="row">
+          <button class="btn small" data-act="lastcall-off">Reopen the line</button>
+          ${!playing.length && !open.length ? '<button class="btn small solid-danger" data-act="end-event">End event</button>' : ''}
+        </div>
+      </div>` : ''}
     <div class="meta-row"><span>${limitText(s)}</span></div>
 
     <h2 class="section-title">On the field</h2>
     <div class="boards">${playingHtml}</div>
 
     <h2 class="section-title">The line
-      ${fixedBoards ? `<span class="muted small" style="text-transform:none;font-family:var(--font)">${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''}</span>` : '<button class="btn small" data-act="add-game">+ Add game</button>'}
+      ${s.closing ? '<span class="muted small" style="text-transform:none;font-family:var(--font)">Last call</span>' : fixedBoards ? `<span class="muted small" style="text-transform:none;font-family:var(--font)">${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''}</span>` : '<button class="btn small" data-act="add-game">+ Add game</button>'}
     </h2>
     <div class="boards">${queueHtml}</div>
-    ${fixedBoards ? `<p class="muted small" style="margin-top:8px">The line always shows ${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''}. When you start a game it moves to the field and a fresh empty board is added. Change the number in Settings.</p>` : ''}
+    ${fixedBoards && !s.closing ? `<p class="muted small" style="margin-top:8px">The line always shows ${st.maxBoards} board${st.maxBoards > 1 ? 's' : ''}. When you start a game it moves to the field and a fresh empty board is added. Change the number in Settings.</p>` : ''}
 
     <h2 class="section-title">Players (${s.roster.length}) <span class="muted small" style="text-transform:none;font-family:var(--font)">${withAlerts} with alerts on</span></h2>
     <section class="card">
@@ -1005,6 +1194,8 @@ function route() {
   window.scrollTo(0, 0);
   if ((m = h.match(/^\/e\/([\w-]+)$/))) return playerView(m[1]);
   if ((m = h.match(/^\/join\/(.+)$/))) return homeView(decodeURIComponent(m[1]));
+  if (h === '/install') return installView();
+  if ((m = h.match(/^\/install\/(.+)$/))) return installView(decodeURIComponent(m[1]));
   if ((m = h.match(/^\/manager\/e\/([\w-]+)$/))) return mgrSession() ? managerEventView(m[1]) : managerAuthView();
   if (h === '/manager') return mgrSession() ? managerHomeView() : managerAuthView();
   return homeView();

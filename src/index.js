@@ -53,8 +53,8 @@ async function handleApi(request, env) {
   /* ----- players ----- */
   if (method === 'POST' && path === '/api/join') {
     const b = await readJson(request);
-    const { eventId } = rpc(await registry.lookupCode(b.code, ip));
-    return forward(env, request, eventId, '/join', { body: { name: b.name, checkOnly: !!b.checkOnly } });
+    const { eventId, moveCode } = rpc(await registry.lookupCode(b.code, ip));
+    return forward(env, request, eventId, '/join', { body: { name: b.name, checkOnly: !!b.checkOnly, moveCode } });
   }
   if ((m = path.match(/^\/api\/events\/([\w-]{6,40})\/ws$/))) {
     if (url.searchParams.get('mt')) {

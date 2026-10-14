@@ -66,6 +66,7 @@ function newGame(ev) {
 //   if the limit is lowered, extra EMPTY boards at the end are removed).
 // - Unlimited: always at least one waiting board with space.
 function ensureOpenBoard(ev) {
+  if (ev.closing) return; // last call: no new boards, existing ones play out
   const max = ev.settings.maxBoards;
   if (max === null) {
     if (!openGames(ev).some(g => !isFull(ev, g))) ev.games.push(newGame(ev));
@@ -117,7 +118,7 @@ export class EventRoom extends DurableObject {
     const ev = this.ev;
     return {
       id: ev.id, name: ev.name, code: ev.code, codeType: ev.codeType, status: ev.status,
-      settings: ev.settings, serverNow: Date.now(),
+      closing: !!ev.closing, settings: ev.settings, serverNow: Date.now(),
       players: Object.fromEntries(Object.values(ev.players).map(p => [p.id, { id: p.id, name: p.name, guest: !!p.guest }])),
       games: ev.games.map(g => ({
         id: g.id, number: g.number, status: g.status, teams: g.teams, pinnies: g.pinnies,
@@ -339,11 +340,26 @@ export class EventRoom extends DurableObject {
     /* ----- player join ----- */
     if (method === 'POST' && path === '/join') {
       if (ev.status !== 'active') fail(404, 'No live event with that code');
+      // Move code: sign this device in as the same person (keeps name + game spots)
+      if (b.moveCode) {
+        ev.moves = ev.moves || {};
+        const mv = ev.moves[b.moveCode];
+        const mp = mv && mv.exp > Date.now() && ev.players[mv.pid];
+        if (!mp) fail(404, 'That move code has expired — get a new one from your browser');
+        if (b.checkOnly) return { eventId: ev.id, name: ev.name, moving: mp.name };
+        delete ev.moves[b.moveCode];
+        await this.registry.releaseMove(b.moveCode);
+        const token = newId(18);
+        ev.tokens[token] = mp.id;
+        mp.guest = false;
+        await this.commit();
+        return { eventId: ev.id, token, playerId: mp.id, name: mp.name, moved: true };
+      }
       if (b.checkOnly) return { eventId: ev.id, name: ev.name };
       const name = cleanName(b.name);
       if (!name) fail(400, 'Enter your name');
       let p = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
-      if (p && !p.guest) fail(409, `Someone is already signed in as "${p.name}". Add a last initial (e.g. "${name} B.") or ask the organizer to free up the name.`);
+      if (p && !p.guest) fail(409, `Someone is already signed in as "${p.name}". If that's you in your browser, open Next Up there and tap "Get my move code". Otherwise add a last initial (e.g. "${name} B.") or ask the organizer to free up the name.`);
       const isNew = !p;
       if (!p) { p = { id: newId(6), name, guest: false, subs: [], joinedAt: Date.now() }; ev.players[p.id] = p; }
       p.guest = false;
@@ -362,6 +378,18 @@ export class EventRoom extends DurableObject {
 
       if (method === 'GET' && path === '/p/me') {
         return { player: { id: p.id, name: p.name, alerts: p.subs.length > 0, alertsOff: !!p.alertsOff }, state: this.publicState() };
+      }
+      if (method === 'POST' && path === '/p/move') {
+        if (ev.status !== 'active') fail(409, 'This event has ended');
+        const TTL = 30 * 60000;
+        const r = await this.registry.reserveMove(ev.id, TTL);
+        if (r.error) fail(r.status, r.error);
+        ev.moves = ev.moves || {};
+        const now = Date.now();
+        for (const [c, v] of Object.entries(ev.moves)) if (v.exp < now || v.pid === p.id) delete ev.moves[c];
+        ev.moves[r.code] = { pid: p.id, exp: now + TTL };
+        await this.ctx.storage.put('ev', ev);
+        return { moveCode: r.code, expiresInMin: 30 };
       }
       if (method === 'POST' && path === '/p/push/off') {
         p.subs = [];
@@ -477,7 +505,7 @@ export class EventRoom extends DurableObject {
           if (r.error) r = await this.registry.reserveCode({ type: 'pin', eventId: ev.id });
           if (r.error) fail(r.status, r.error);
           ev.code = r.code; if (r.codeType) ev.codeType = r.codeType;
-          ev.status = 'active'; delete ev.endedAt;
+          ev.status = 'active'; delete ev.endedAt; ev.closing = false;
           ensureOpenBoard(ev);
           await this.commit();
           await this.syncSummary();
@@ -500,6 +528,23 @@ export class EventRoom extends DurableObject {
         this.queuePush([sub], { title: 'Organizer alerts on', body: `You'll hear when a game's time is up at ${ev.name}.`, tag: 'nextup-mgr-' + ev.id, url: `/#/manager/e/${ev.id}` }, 'm');
         await this.commit();
         return { ok: true };
+      }
+
+      if (method === 'POST' && path === '/m/lastcall') {
+        live();
+        const on = !!b.on;
+        if (on !== !!ev.closing) {
+          ev.closing = on;
+          if (on) {
+            for (const pid of Object.keys(ev.players)) {
+              this.notifyPlayer(pid, 'Last call 🏁', "No new games after the ones on the board. Grab an open spot now if you want one more.", 'lastcall-' + ev.id);
+            }
+          } else {
+            ensureOpenBoard(ev); // line reopens and refills
+          }
+          await this.commit();
+        }
+        return { ok: true, closing: !!ev.closing };
       }
 
       if (method === 'POST' && path === '/m/announce') {
@@ -642,6 +687,7 @@ export class EventRoom extends DurableObject {
         if (ev.history.length > 50) ev.history.shift();
         ensureOpenBoard(ev);
         this.checkUpNext();
+        if (ev.closing && ev.games.length === 0) this.notifyManager("That's a wrap", 'Every game has been played. End the event when you\'re ready.');
         break;
       }
       case 'delete': {

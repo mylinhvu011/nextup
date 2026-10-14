@@ -338,3 +338,41 @@ dialog .dlg-foot { padding: 12px 16px; border-top: 1px solid var(--line); displa
 .color-row input[type=color] {
   width: 100%; height: 40px; padding: 2px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--surface-2); cursor: pointer;
 }
+
+/* ---------- install nudge + help page ---------- */
+.nudge {
+  display: grid; gap: 10px; padding: 14px; margin-bottom: 14px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--lime) 28%, var(--surface));
+  border: 1.5px solid color-mix(in srgb, var(--lime) 70%, var(--line));
+}
+.nudge-text { display: grid; gap: 2px; font-size: 14px; }
+.nudge-text b { font-size: 15px; }
+.steps { margin: 0; padding-left: 0; list-style: none; counter-reset: step; display: grid; gap: 12px; }
+.steps li { counter-increment: step; position: relative; padding-left: 40px; min-height: 28px; line-height: 1.5; padding-top: 2px; }
+.steps li::before {
+  content: counter(step); position: absolute; left: 0; top: 0; width: 28px; height: 28px; border-radius: 50%;
+  display: grid; place-items: center; font: 800 16px/1 var(--display);
+  background: var(--grass); color: var(--on-primary);
+}
+.key {
+  display: inline-block; min-width: 1.6em; padding: 1px 7px; border-radius: 6px; text-align: center;
+  border: 1px solid var(--line); background: var(--surface-2); font-weight: 700; font-size: .95em;
+}
+.key.big { font: 800 20px/1.2 var(--display); letter-spacing: .1em; padding: 2px 10px; }
+.movecode {
+  font: 800 44px/1 var(--display); letter-spacing: .18em; text-align: center; padding: 16px;
+  border: 2px dashed var(--grass); border-radius: 12px; margin-bottom: 8px; text-transform: uppercase;
+}
+.hero .btn.lime { color: var(--on-accent); }
+
+/* ---------- last call ---------- */
+.lastcall {
+  display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; justify-content: space-between;
+  padding: 12px 14px; margin-bottom: 14px; border-radius: 12px;
+  background: var(--pitch); color: #fff; border-left: 6px solid var(--lime);
+}
+.lastcall > div:first-child, .lastcall { font-size: 14px; }
+.lastcall b { display: block; font: 800 20px/1.1 var(--display); text-transform: uppercase; letter-spacing: .03em; color: var(--accent-on-dark, var(--lime)); }
+.lastcall span { color: rgba(255,255,255,.88); }
+.lastcall .btn { background: rgba(255,255,255,.95); color: #12201a; border-color: transparent; }
+.lastcall .btn.solid-danger { background: var(--danger); color: #fff; }
