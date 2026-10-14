@@ -376,3 +376,8 @@ dialog .dlg-foot { padding: 12px 16px; border-top: 1px solid var(--line); displa
 .lastcall span { color: rgba(255,255,255,.88); }
 .lastcall .btn { background: rgba(255,255,255,.95); color: #12201a; border-color: transparent; }
 .lastcall .btn.solid-danger { background: var(--danger); color: #fff; }
+
+/* ---------- in-app confirm / prompt ---------- */
+dialog.ask { width: min(420px, calc(100% - 32px)); }
+.ask-msg { margin: 0; font-size: 16px; line-height: 1.45; white-space: pre-line; }
+.ask-input { margin-top: 12px; }

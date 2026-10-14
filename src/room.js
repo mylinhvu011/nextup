@@ -698,6 +698,16 @@ export class EventRoom extends DurableObject {
         this.checkUpNext();
         break;
       }
+      case 'clear': {
+        // Take everyone off a waiting board but keep the board in its place
+        if (g.status !== 'open') fail(409, 'Only a waiting game can be cleared');
+        const was = gamePlayers(g);
+        g.teams = { a: [], b: [] };
+        g.notifiedNext = [];
+        for (const pid of was) this.notifyPlayer(pid, `Game ${g.number} was cleared`, 'The organizer took everyone off that game. Put your name down again if you want to play.');
+        this.checkUpNext();
+        break;
+      }
       case 'pinnies':
         g.pinnies = g.pinnies === 'a' ? 'b' : 'a';
         break;

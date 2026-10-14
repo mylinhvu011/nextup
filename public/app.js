@@ -162,6 +162,42 @@ function onNotice(n) {
   try { navigator.vibrate?.([200, 100, 200]); } catch {}
 }
 
+/* ---------------- in-app confirm / prompt ----------------
+   The browser's built-in confirm()/prompt() boxes are silently blocked in some places
+   (in-app browsers like Instagram/Messenger/GroupMe, or after "prevent more dialogs"),
+   which made buttons like Sign out do nothing. These use the app's own dialog instead. */
+function uiDialog({ message, ok = 'OK', cancel = 'Cancel', danger = false, input = null }) {
+  return new Promise(resolve => {
+    const d = document.createElement('dialog');
+    d.className = 'ask';
+    d.innerHTML = `<form method="dialog">
+      <div class="dlg-body"><p class="ask-msg"></p>${input !== null ? '<input class="ask-input" maxlength="200">' : ''}</div>
+      <div class="dlg-foot"><button class="btn" value="cancel">${esc(cancel)}</button><button class="btn ${danger ? 'solid-danger' : 'primary'}" value="ok">${esc(ok)}</button></div>
+    </form>`;
+    $('.ask-msg', d).textContent = message;
+    const inp = $('.ask-input', d);
+    if (inp) {
+      inp.value = input;
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); d.close('ok'); } });
+    }
+    let done = false;
+    const finish = v => { if (!done) { done = true; resolve(v); d.remove(); } };
+    d.addEventListener('close', () => {
+      const yes = d.returnValue === 'ok';
+      finish(inp ? (yes ? inp.value : null) : yes);
+    });
+    document.body.appendChild(d);
+    if (typeof d.showModal !== 'function') { // very old browsers
+      d.remove();
+      return resolve(inp ? window.prompt(message, input) : window.confirm(message));
+    }
+    d.showModal();
+    (inp || $('[value=ok]', d)).focus();
+  });
+}
+const uiConfirm = (message, opts = {}) => uiDialog({ message, ...opts });
+const uiPrompt = (message, value = '', opts = {}) => uiDialog({ message, input: value ?? '', ...opts });
+
 /* ---------------- push notifications ---------------- */
 const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -660,7 +696,7 @@ async function playerView(eventId) {
         await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/signup`, { team: el.dataset.team });
         toast("You're on the list!");
       } else if (a === 'leave') {
-        if (!confirm('Take your name off this game?')) return;
+        if (!(await uiConfirm('Take your name off this game?', { ok: 'Take me off', danger: true }))) return;
         await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/leave`);
       } else if (a === 'alerts') {
         el.disabled = true;
@@ -673,7 +709,8 @@ async function playerView(eventId) {
         me.alerts = false; me.alertsOff = true; quiet = true; render();
         toast("Alerts off — you won't get notifications. You can turn them back on any time.");
       } else if (a === 'signout') {
-        if (!confirm('Sign out? Your name will be taken off any games that haven\'t started.')) return;
+        const ended = live && live.state.status !== 'active';
+        if (!ended && !(await uiConfirm('Sign out? Your name will be taken off any games that haven\'t started.', { ok: 'Sign out', danger: true }))) return;
         await papi(eventId, 'POST', `/api/events/${eventId}/signout`).catch(() => {});
         store.del('nu.player.' + eventId); store.del('nu.lastEvent');
         location.hash = '#/';
@@ -682,7 +719,12 @@ async function playerView(eventId) {
       }
     } catch (e) { toast(e.message, 'warn'); el.disabled = false; render(); }
   };
-  const onClick = e => { const el = e.target.closest('[data-act]'); if (el) act(el); };
+  const onClick = e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    if (el.tagName === 'A') e.preventDefault(); // let the action decide where to go
+    act(el);
+  };
   document.addEventListener('click', onClick);
 
   view = { cleanup() { es.close(); clearInterval(refresher); render.dispose(); document.removeEventListener('click', onClick); live = null; } };
@@ -766,7 +808,7 @@ function joinLink(code) { return `${location.origin}/?code=${encodeURIComponent(
 async function shareJoin(code) {
   const url = joinLink(code);
   if (navigator.share) { try { await navigator.share({ title: 'Join the game on Next Up', text: `Code: ${code}`, url }); return; } catch {} }
-  try { await navigator.clipboard.writeText(url); toast('Join link copied'); } catch { prompt('Copy this link', url); }
+  try { await navigator.clipboard.writeText(url); toast('Join link copied'); } catch { await uiPrompt('Copy this link:', url, { ok: 'Done', cancel: 'Close' }); }
 }
 
 /* ================================================================== */
@@ -792,7 +834,8 @@ function managerAuthView() {
           <button class="btn primary block" type="submit">${mode === 'login' ? 'Sign in' : 'Create account'}</button>
           <p class="err" id="authErr"></p>
         </form>
-      </section>`;
+      </section>
+      <p class="muted small" style="text-align:center">Here to play? <a href="#/">Join a game as a player</a></p>`;
     $$('[data-mode]').forEach(b => b.onclick = () => { mode = b.dataset.mode; draw(); });
     $('#authForm').onsubmit = async e => {
       e.preventDefault();
@@ -957,39 +1000,46 @@ async function managerEventView(eventId) {
       switch (a) {
         case 'start': {
           const busy = s.games.filter(x => x.status === 'playing').length;
-          if (busy >= s.settings.fields && !confirm(`${busy === 1 ? 'A game is' : `${busy} games are`} still on the field. Start Game ${g.number} anyway?`)) return;
+          if (busy >= s.settings.fields && !(await uiConfirm(`${busy === 1 ? 'A game is' : `${busy} games are`} still on the field. Start Game ${g.number} anyway?`))) return;
           await gameAct(gid, 'start'); break;
         }
         case 'pause': case 'resume': case 'reset': case 'pinnies': case 'up': case 'down':
           await gameAct(gid, a); break;
         case 'addtime': await gameAct(gid, 'addtime', { seconds: Number(el.dataset.sec) }); break;
         case 'end':
-          if (!confirm(`End Game ${g.number} and clear the board?`)) return;
+          if (!(await uiConfirm(`End Game ${g.number} and clear the board?`, { ok: 'End game', danger: true }))) return;
           await gameAct(gid, 'end'); toast(`Game ${g.number} cleared`); break;
-        case 'delete':
-          if (!confirm(`Delete Game ${g.number}? Everyone on it will be taken off.`)) return;
-          await gameAct(gid, 'delete'); break;
+        case 'delete': {
+          const n = g.teams.a.length + g.teams.b.length;
+          if (!(await uiConfirm(`Delete Game ${g.number}?${n ? ` The ${n} player${n > 1 ? 's' : ''} on it will be taken off.` : ''}`, { ok: 'Delete', danger: true }))) return;
+          await gameAct(gid, 'delete'); toast(`Game ${g.number} deleted`); break;
+        }
+        case 'clear': {
+          const n = g.teams.a.length + g.teams.b.length;
+          if (!(await uiConfirm(`Take all ${n} player${n > 1 ? 's' : ''} off Game ${g.number}? The board stays in the line, empty.`, { ok: 'Clear board', danger: true }))) return;
+          await gameAct(gid, 'clear'); toast(`Game ${g.number} cleared`); break;
+        }
         case 'switch': await mapi('POST', `${base}/games/${gid}/players/${pid}/switch`); break;
         case 'rm-player':
-          if (!confirm(`Take ${s.players[pid]?.name} off Game ${g.number}?`)) return;
+          if (!(await uiConfirm(`Take ${s.players[pid]?.name} off Game ${g.number}?`))) return;
           await mapi('POST', `${base}/games/${gid}/players/${pid}/remove`); break;
         case 'add-game': await mapi('POST', `${base}/games`); break;
         case 'release':
-          if (!confirm(`Sign out ${s.players[pid]?.name}'s phone so the name can be used again? Their game spots are kept.`)) return;
+          if (!(await uiConfirm(`Sign out ${s.players[pid]?.name}'s phone so the name can be used again? Their game spots are kept.`))) return;
           await mapi('POST', `${base}/players/${pid}/release`); break;
         case 'kick':
-          if (!confirm(`Remove ${s.players[pid]?.name} from the event and all games?`)) return;
+          if (!(await uiConfirm(`Remove ${s.players[pid]?.name} from the event and all games?`, { ok: 'Remove', danger: true }))) return;
           await mapi('POST', `${base}/players/${pid}/remove`); break;
         case 'settings': openSettings(); break;
         case 'lastcall':
-          if (!confirm('Turn on last call?\n\nNo new boards will be added. Games already on the board can still be played and people can still grab open spots on them. Everyone gets a "last call" notification.')) return;
+          if (!(await uiConfirm('Turn on last call?\n\nNo new boards will be added. Games already on the board can still be played and people can still grab open spots on them. Everyone gets a "last call" notification.'))) return;
           await mapi('POST', `${base}/lastcall`, { on: true });
           toast('Last call is on'); break;
         case 'lastcall-off':
           await mapi('POST', `${base}/lastcall`, { on: false });
           toast('The line is open again'); break;
         case 'announce': {
-          const msg = prompt('Message to everyone (sent as a notification):');
+          const msg = await uiPrompt('Message to everyone (sent as a notification):', '', { ok: 'Send' });
           if (msg && msg.trim()) { await mapi('POST', `${base}/announce`, { message: msg }); toast('Sent'); }
           break;
         }
@@ -1003,19 +1053,19 @@ async function managerEventView(eventId) {
           toast('Organizer alerts off'); break;
         case 'share': shareJoin(s.code); break;
         case 'newpin':
-          if (!confirm('Make a new 4-digit code? The old one stops working (people already in stay in).')) return;
+          if (!(await uiConfirm('Make a new 4-digit code? The old one stops working (people already in stay in).'))) return;
           await mapi('POST', `${base}/code`, { type: 'pin' }); break;
         case 'custompw': {
-          const c = prompt('New join password (4–32 characters):', s.codeType === 'custom' ? s.code : '');
+          const c = await uiPrompt('New join password (4–32 characters):', s.codeType === 'custom' ? s.code : '', { ok: 'Save' });
           if (c) await mapi('POST', `${base}/code`, { type: 'custom', code: c });
           break;
         }
         case 'end-event':
-          if (!confirm('End this event? Players can no longer join or sign up. You can reopen it later.')) return;
+          if (!(await uiConfirm('End this event? Players can no longer join or sign up. You can reopen it later.', { ok: 'End event', danger: true }))) return;
           await mapi('POST', `${base}/end`); break;
         case 'reopen': await mapi('POST', `${base}/reopen`); break;
         case 'delete-event':
-          if (!confirm('Delete this event for good?')) return;
+          if (!(await uiConfirm('Delete this event for good?', { ok: 'Delete', danger: true }))) return;
           await mapi('DELETE', base); location.hash = '#/manager'; break;
         case 'player-view':
           window.open(joinLink(s.code), '_blank'); break;
@@ -1095,12 +1145,19 @@ function renderManager(s) {
     return boardHtml(s, g, { manager: true, footer });
   }).join('') : `<div class="empty">No game on the field. Hit <b>Start</b> on the next game below.</div>`;
 
+  // With a fixed board count (and no last call) a deleted board is replaced right away,
+  // so offer "Clear board" there; otherwise "Delete" removes the board for good.
+  const removeBtn = g => {
+    const n = g.teams.a.length + g.teams.b.length;
+    if (fixedBoards && !s.closing) return n ? `<button class="btn small danger" data-act="clear" data-gid="${g.id}">Clear board</button>` : '';
+    return `<button class="btn small danger" data-act="delete" data-gid="${g.id}">Delete</button>`;
+  };
   const queueHtml = open.length ? open.map((g, idx) => {
     const footer = `<button class="btn small primary" data-act="start" data-gid="${g.id}">▶ Start game</button>
       <button class="iconbtn" title="Move up" aria-label="Move up" data-act="up" data-gid="${g.id}" ${idx === 0 ? 'disabled' : ''}>↑</button>
       <button class="iconbtn" title="Move down" aria-label="Move down" data-act="down" data-gid="${g.id}" ${idx === open.length - 1 ? 'disabled' : ''}>↓</button>
       <button class="btn small" data-act="pinnies" data-gid="${g.id}">Swap pinnies</button>
-      <button class="btn small danger" data-act="delete" data-gid="${g.id}">Delete</button>
+      ${removeBtn(g)}
       <form data-walkup="${g.id}"><input placeholder="Add walk-up name" maxlength="24" aria-label="Add player to Game ${g.number}"><button class="btn small">Add</button></form>`;
     return boardHtml(s, g, { manager: true, idx, footer });
   }).join('') : '<div class="empty">No games waiting.</div>';
