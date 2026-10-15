@@ -682,8 +682,10 @@ function homeView(prefill = '') {
         if (r.needsConfirm) {
           // Someone already put this name on the list — check it's really them.
           const where = r.games.map(g => `Game ${g.number} (Team ${g.team}${g.playing ? ', playing now' : ''})`).join(', ');
-          const who = r.addedBy ? `${r.addedBy} added "${r.name}"` : `The organizer added "${r.name}"`;
-          const yes = await uiConfirm(`${who} to the list: ${where}.\n\nIs that you?`, { ok: "Yes, that's me", cancel: 'No, not me' });
+          let msg;
+          if (r.signedIn) msg = `"${r.name}" is already signed in at this event${where ? ` — on ${where}` : ''}.\n\nIs that you? (Got signed out, or switched phones?)`;
+          else msg = `${r.addedBy ? `${r.addedBy} added "${r.name}"` : `The organizer added "${r.name}"`} to the list: ${where}.\n\nIs that you?`;
+          const yes = await uiConfirm(msg, { ok: "Yes, that's me", cancel: 'No, not me' });
           if (!yes) {
             err.textContent = `"${r.name}" is taken by someone else at this event — add a last initial, e.g. "${r.name} B."`;
             $('#name').focus(); $('#name').select();
@@ -691,7 +693,7 @@ function homeView(prefill = '') {
             return;
           }
           r = await api('POST', '/api/join', { code, name: $('#name').value, confirmClaim: true });
-          toast(`Welcome, ${r.name} — your spot is saved`, 'alert', 5000);
+          toast(r.rejoined ? `Welcome back, ${r.name} — you're signed back in` : `Welcome, ${r.name} — your spot is saved`, 'alert', 5000);
         }
         store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name, eventCode: code });
         store.set('nu.lastEvent', r.eventId);

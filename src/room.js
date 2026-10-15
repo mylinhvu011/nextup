@@ -371,12 +371,22 @@ export class EventRoom extends DurableObject {
       const name = cleanName(b.name);
       if (!name) fail(400, 'Enter your name');
       let p = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
-      if (p && !p.guest) fail(409, `Someone is already signed in as "${p.name}". If that's you in your browser, open Next Up there and tap "Get my move code". Otherwise add a last initial (e.g. "${name} B.") or ask the organizer to free up the name.`);
+      const spotsOf = pl => ev.games.filter(g => gamePlayers(g).includes(pl.id)).map(g => ({
+        number: g.number, team: g.teams.a.includes(pl.id) ? 1 : 2, playing: g.status === 'playing'
+      }));
+      // Name already signed in (got logged out, switched phones, cleared the browser): confirm it's them.
+      if (p && !p.guest) {
+        if (!b.confirmClaim) return { needsConfirm: true, signedIn: true, name: p.name, addedBy: null, games: spotsOf(p) };
+        // Heads-up to the phone(s) already signed in under this name, in case it wasn't them.
+        this.notifyPlayer(p.id, `Signed in on another phone`, `Someone just signed in as ${p.name}. If that wasn't you, tell the organizer — they can sign out the other phone.`, 'signin-' + p.id);
+        const token = newId(18);
+        ev.tokens[token] = p.id;
+        await this.commit();
+        return { eventId: ev.id, token, playerId: p.id, name: p.name, rejoined: true };
+      }
       // Name was put on the list by a friend (or the organizer): make sure it's really them first.
       if (p && p.guest && (p.addedBy || p.walkup) && !b.confirmClaim) {
-        const spots = ev.games.filter(g => gamePlayers(g).includes(p.id)).map(g => ({
-          number: g.number, team: g.teams.a.includes(p.id) ? 1 : 2, playing: g.status === 'playing'
-        }));
+        const spots = spotsOf(p);
         if (spots.length) {
           const host = p.addedBy && ev.players[p.addedBy];
           return { needsConfirm: true, name: p.name, addedBy: host ? host.name : null, games: spots };
