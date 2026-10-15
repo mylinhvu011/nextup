@@ -68,19 +68,15 @@ const chipsHtml = t => `<span class="chips"><span style="background:${shade(t.ma
 function themeFields(cur) {
   cur = cur && cur.main ? cur : DEFAULT_THEME;
   const custom = !THEMES.some(t => t.id === cur.preset);
-  return `<div class="full">
-    <label>Colors</label>
-    <div class="swatches" id="themeSw">
+  return `<div class="swatches" id="themeSw">
       ${THEMES.map(t => `<button type="button" class="swatch" data-theme="${t.id}" aria-pressed="${!custom && cur.preset === t.id}">${chipsHtml(t)}${t.name}</button>`).join('')}
-      <button type="button" class="swatch" data-theme="custom" aria-pressed="${custom}"><span id="customChips">${chipsHtml(cur)}</span>Custom</button>
     </div>
-    <div class="color-row">
+    <div class="color-row ${custom ? '' : 'hidden'}" id="customColors">
       <div><label for="c_main">Main</label><input type="color" id="c_main" value="${cur.main}"></div>
       <div><label for="c_accent">Highlight</label><input type="color" id="c_accent" value="${cur.accent}"></div>
       <div><label for="c_pinnie">Pinnies</label><input type="color" id="c_pinnie" value="${cur.pinnie}"></div>
     </div>
-    <div class="field-hint">Pick a scheme or set your own — tip: match "Pinnies" to your real bibs. Everyone's screen updates when you save.</div>
-  </div>`;
+    <button type="button" class="set-link" id="pickOwn" aria-expanded="${custom}">${custom ? 'Using my own colors' : 'Pick my own colors'}<span aria-hidden="true">›</span></button>`;
 }
 function readTheme(root) {
   const pressed = $('#themeSw [aria-pressed=true]', root);
@@ -90,7 +86,7 @@ function wireTheme(root) {
   const sw = $('#themeSw', root);
   if (!sw) return;
   const press = id => $$('[data-theme]', sw).forEach(b => b.setAttribute('aria-pressed', b.dataset.theme === id));
-  const preview = () => { const t = readTheme(root); $('#customChips', root).innerHTML = chipsHtml(t); applyTheme(t); };
+  const preview = () => { applyTheme(readTheme(root)); root.dispatchEvent(new Event('settingschange')); };
   $$('[data-theme]', sw).forEach(b => b.onclick = () => {
     const t = THEMES.find(x => x.id === b.dataset.theme);
     if (t) { $('#c_main', root).value = t.main; $('#c_accent', root).value = t.accent; $('#c_pinnie', root).value = t.pinnie; }
@@ -98,6 +94,13 @@ function wireTheme(root) {
     preview();
   });
   for (const id of ['c_main', 'c_accent', 'c_pinnie']) $('#' + id, root).addEventListener('input', () => { press('custom'); preview(); });
+  const own = $('#pickOwn', root);
+  if (own) own.onclick = () => {
+    const box = $('#customColors', root);
+    const open = box.classList.toggle('hidden') === false;
+    own.setAttribute('aria-expanded', open);
+    own.firstChild.textContent = open ? 'Hide my own colors' : 'Pick my own colors';
+  };
 }
 let view = null;          // current view's cleanup handle
 let live = null;          // { state, offset } for timers
@@ -196,6 +199,53 @@ function uiDialog({ message, ok = 'OK', cancel = 'Cancel', danger = false, input
   });
 }
 const uiConfirm = (message, opts = {}) => uiDialog({ message, ...opts });
+
+// Add-a-friend: name + which team. Resolves { name, team } or null.
+function friendDialog(s, g) {
+  return new Promise(resolve => {
+    const cap = s.settings.playersPerTeam;
+    const full = t => g.teams[t].length >= cap;
+    const d = document.createElement('dialog');
+    d.className = 'ask';
+    d.innerHTML = `<form method="dialog" novalidate>
+      <div class="dlg-body">
+        <p class="ask-msg"><b>Add a friend to Game ${g.number}</b></p>
+        <label for="fr_name" style="margin-top:12px">Friend's name</label>
+        <input id="fr_name" maxlength="24" placeholder="e.g. Jo M." autocomplete="off" autocapitalize="words">
+        <label style="margin-top:12px">Team</label>
+        <div class="seg" id="fr_team" style="display:flex">
+          <button type="button" class="grow" data-t="" aria-pressed="true">Either</button>
+          <button type="button" class="grow" data-t="a" aria-pressed="false" ${full('a') ? 'disabled' : ''}>Team 1${g.pinnies === 'a' ? ' 🟧' : ''}</button>
+          <button type="button" class="grow" data-t="b" aria-pressed="false" ${full('b') ? 'disabled' : ''}>Team 2${g.pinnies === 'b' ? ' 🟧' : ''}</button>
+        </div>
+        <p class="field-hint">🟧 = pinnies. You can switch their team later. You'll get their alerts — if they join on their own phone with this name, the spot becomes theirs.</p>
+        <p class="err" id="fr_err"></p>
+      </div>
+      <div class="dlg-foot"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="ok">Add friend</button></div>
+    </form>`;
+    let team = '';
+    $$('[data-t]', d).forEach(b => b.onclick = () => {
+      team = b.dataset.t;
+      $$('[data-t]', d).forEach(x => x.setAttribute('aria-pressed', x === b));
+    });
+    const inp = $('#fr_name', d);
+    const tryOk = () => {
+      if (!inp.value.trim()) { $('#fr_err', d).textContent = "Enter your friend's name"; inp.focus(); return false; }
+      d.close('ok'); return true;
+    };
+    $('form', d).addEventListener('submit', e => { if (e.submitter && e.submitter.value === 'ok') { e.preventDefault(); tryOk(); } });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); tryOk(); } });
+    let done = false;
+    d.addEventListener('close', () => {
+      if (done) return; done = true;
+      resolve(d.returnValue === 'ok' ? { name: inp.value.trim(), team } : null);
+      d.remove();
+    });
+    document.body.appendChild(d);
+    d.showModal();
+    inp.focus();
+  });
+}
 const uiPrompt = (message, value = '', opts = {}) => uiDialog({ message, input: value ?? '', ...opts });
 
 /* ---------------- push notifications ---------------- */
@@ -520,11 +570,20 @@ function teamCol(s, g, team, opts) {
   const rows = ids.map(pid => {
     const p = s.players[pid] || { name: '—' };
     const me = opts.meId === pid;
-    const ctrls = opts.manager ? `
+    const mine = !opts.manager && opts.meId && p.addedBy === opts.meId; // a friend this player added
+    const host = p.addedBy && s.players[p.addedBy];
+    let ctrls = '';
+    if (opts.manager) ctrls = `
       <button class="iconbtn" title="Move to other team" aria-label="Move ${esc(p.name)} to other team" data-act="switch" data-gid="${g.id}" data-pid="${pid}">⇄</button>
-      <button class="iconbtn" title="Remove from game" aria-label="Remove ${esc(p.name)}" data-act="rm-player" data-gid="${g.id}" data-pid="${pid}">✕</button>` : '';
-    const guest = opts.manager && p.guest ? '<span class="guest">walk-up</span>' : '';
-    return `<li class="${me ? 'me' : ''}"><span class="nm">${esc(p.name)}${me ? ' (you)' : ''}</span>${guest}${ctrls}</li>`;
+      <button class="iconbtn" title="Remove from game" aria-label="Remove ${esc(p.name)}" data-act="rm-player" data-gid="${g.id}" data-pid="${pid}">✕</button>`;
+    else if (mine && g.status === 'open') ctrls = `
+      <button class="iconbtn" title="Move to other team" aria-label="Move ${esc(p.name)} to other team" data-act="friend-switch" data-gid="${g.id}" data-pid="${pid}">⇄</button>
+      <button class="iconbtn" title="Take off this game" aria-label="Take ${esc(p.name)} off" data-act="friend-remove" data-gid="${g.id}" data-pid="${pid}">✕</button>`;
+    let label = '';
+    if (mine) label = '<span class="guest friend">your friend</span>';
+    else if (host) label = `<span class="guest">friend of ${esc(host.name)}</span>`;
+    else if (opts.manager && p.guest) label = '<span class="guest">walk-up</span>';
+    return `<li class="${me ? 'me' : ''}${mine ? ' myfriend' : ''}"><span class="nm">${esc(p.name)}${me ? ' (you)' : ''}</span>${label}${ctrls}</li>`;
   }).join('');
   const open = Math.max(0, cap - ids.length);
   const slots = Array.from({ length: Math.min(open, 12) }, () => '<li class="slot">open spot</li>').join('');
@@ -619,7 +678,21 @@ function homeView(prefill = '') {
         $('#name').focus();
       } else {
         if (!$('#name').value.trim()) throw new Error('Enter your name');
-        const r = await api('POST', '/api/join', { code, name: $('#name').value });
+        let r = await api('POST', '/api/join', { code, name: $('#name').value });
+        if (r.needsConfirm) {
+          // Someone already put this name on the list — check it's really them.
+          const where = r.games.map(g => `Game ${g.number} (Team ${g.team}${g.playing ? ', playing now' : ''})`).join(', ');
+          const who = r.addedBy ? `${r.addedBy} added "${r.name}"` : `The organizer added "${r.name}"`;
+          const yes = await uiConfirm(`${who} to the list: ${where}.\n\nIs that you?`, { ok: "Yes, that's me", cancel: 'No, not me' });
+          if (!yes) {
+            err.textContent = `"${r.name}" is taken by someone else at this event — add a last initial, e.g. "${r.name} B."`;
+            $('#name').focus(); $('#name').select();
+            btn.disabled = false;
+            return;
+          }
+          r = await api('POST', '/api/join', { code, name: $('#name').value, confirmClaim: true });
+          toast(`Welcome, ${r.name} — your spot is saved`, 'alert', 5000);
+        }
         store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name, eventCode: code });
         store.set('nu.lastEvent', r.eventId);
         location.hash = '#/e/' + r.eventId;
@@ -689,8 +762,28 @@ async function playerView(eventId) {
   }
 
   const act = async (el) => {
-    const a = el.dataset.act, gid = el.dataset.gid;
+    const a = el.dataset.act, gid = el.dataset.gid, pid = el.dataset.pid;
     try {
+      if (a === 'add-friend') {
+        const g = live.state.games.find(x => x.id === gid);
+        if (!g) return;
+        const r = await friendDialog(live.state, g);
+        if (!r) return;
+        await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/friend`, { name: r.name, team: r.team || undefined });
+        toast(`${r.name} is on Game ${g.number} — you'll get their alerts`);
+        return;
+      }
+      if (a === 'friend-switch') {
+        await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/friends/${pid}/switch`);
+        return;
+      }
+      if (a === 'friend-remove') {
+        const nm = live.state.players[pid]?.name || 'your friend';
+        const g = live.state.games.find(x => x.id === gid);
+        if (!(await uiConfirm(`Take ${nm} off Game ${g ? g.number : ''}?`, { ok: 'Take off', danger: true }))) return;
+        await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/friends/${pid}/remove`);
+        return;
+      }
       if (a === 'join') {
         el.disabled = true;
         await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/signup`, { team: el.dataset.team });
@@ -771,6 +864,13 @@ function renderPlayer(s, me) {
       <div class="sub">${sub}</div></div>`;
   }
 
+  const myFriendSpots = [];
+  for (const g of s.games) for (const pid of [...g.teams.a, ...g.teams.b]) {
+    const fp = s.players[pid];
+    if (fp && fp.addedBy === me.id) myFriendSpots.push(`<b>${esc(fp.name)}</b> · ${g.status === 'playing' ? 'playing now' : `Game ${g.number}`}`);
+  }
+  const friendsLine = myFriendSpots.length ? `<p class="friends-line">👥 Your friends: ${myFriendSpots.join(' &nbsp;|&nbsp; ')} <span class="muted">— you'll get their alerts</span></p>` : '';
+
   const playingHtml = playing.length
     ? `<div class="boards">${playing.map(g => boardHtml(s, g, { meId: me.id })).join('')}</div>`
     : `<div class="empty">Nothing on the field right now.</div>`;
@@ -780,11 +880,13 @@ function renderPlayer(s, me) {
     const cap = st.playersPerTeam;
     const full = g.teams.a.length + g.teams.b.length >= cap * 2;
     let footer = '';
+    const friendBtn = st.maxFriends !== 0 && !full ? `<button class="btn small" data-act="add-friend" data-gid="${g.id}">+ Add a friend</button>` : '';
     if (isMine) footer = st.allowLeave ? `<span class="note grow">You're on this game.</span><button class="btn small danger" data-act="leave" data-gid="${g.id}">Take my name off</button>` : `<span class="note">You're on this game.</span>`;
     else if (full) footer = `<span class="note">This game is full.</span>`;
     else if (limitHit) footer = `<span class="note">${st.maxSignups === 1 ? "You're already on a game." : `You're on ${st.maxSignups} games — that's the limit.`}</span>`;
     else if (st.allowTeamPick) footer = ['a', 'b'].map(t => `<button class="btn primary small grow" data-act="join" data-gid="${g.id}" data-team="${t}" ${g.teams[t].length >= cap ? 'disabled' : ''}>Join Team ${t === 'a' ? 1 : 2}${g.pinnies === t ? ' (pinnies)' : ''}</button>`).join('');
-    else footer = `<button class="btn primary block" data-act="join" data-gid="${g.id}">Put my name down</button>`;
+    else footer = `<button class="btn primary ${friendBtn ? 'grow' : 'block'}" data-act="join" data-gid="${g.id}">Put my name down</button>`;
+    if (friendBtn) footer += friendBtn;
     return boardHtml(s, g, { meId: me.id, idx, footer });
   }).join('')}</div>`
     : `<div class="empty">${s.closing ? 'No more games in the line — last call is on.' : 'No games waiting right now.'}</div>`;
@@ -795,10 +897,16 @@ function renderPlayer(s, me) {
     ${alertBar(me.alerts, 'alerts', 'alerts-off')}
     ${s.closing ? `<div class="lastcall"><b>🏁 Last call</b><span>No new games after the ones on the board. ${open.length ? `${open.length} game${open.length > 1 ? 's' : ''} left in the line.` : 'These are the final games.'}</span></div>` : ''}
     ${status}
+    ${friendsLine}
+    <button type="button" class="codechip" data-act="share" aria-label="Share the event code">
+      <span class="codechip-label">${s.codeType === 'custom' ? 'Event password' : 'Event code'}</span>
+      <span class="codechip-code ${s.codeType === 'custom' ? 'custom' : ''}">${esc(s.code)}</span>
+      <span class="codechip-share">Share ↗</span>
+    </button>
     <div class="meta-row"><span>${esc(s.name)}</span><span>${limitText(s)}</span>${st.maxSignups !== null ? `<span>You: <b>${mySignups.length}/${st.maxSignups}</b></span>` : ''}</div>
     <h2 class="section-title">On the field</h2>
     ${playingHtml}
-    <h2 class="section-title">The line <button class="btn small ghost" data-act="share">Invite · code ${esc(s.code)}</button></h2>
+    <h2 class="section-title">The line</h2>
     ${queueHtml}
     ${atLimit && open.length ? `<p class="muted small" style="margin-top:10px">Every board is full. A new board opens as soon as the next game starts.</p>` : ''}
   `;
@@ -852,70 +960,160 @@ function managerAuthView() {
   draw();
 }
 
-function settingsFields(st, withCode) {
-  const num = (id, label, val, min, max, hint) => `<div><label for="${id}">${label}</label><input id="${id}" type="number" inputmode="numeric" min="${min}" max="${max}" value="${val}" required>${hint ? `<div class="field-hint">${hint}</div>` : ''}</div>`;
-  const unl = (id, label, val, max, hint) => `<div><label for="${id}">${label}</label>
-    <div class="inline-unl"><input id="${id}" type="number" inputmode="numeric" min="1" max="${max}" value="${val ?? ''}" ${val === null ? 'disabled' : ''} placeholder="∞">
-    <label class="check"><input type="checkbox" id="${id}Unl" ${val === null ? 'checked' : ''}> Unlimited</label></div>
-    ${hint ? `<div class="field-hint">${hint}</div>` : ''}</div>`;
-  return `
-    ${withCode ? `
-    <div class="full">
-      <label>How players join</label>
-      <div class="seg" id="codeSeg"><button type="button" data-ct="pin" aria-pressed="true">4-digit code</button><button type="button" data-ct="custom" aria-pressed="false">Custom password</button></div>
-      <input id="customCode" class="hidden" style="margin-top:8px" maxlength="32" placeholder="e.g. tuesdayfooty">
-      <div class="field-hint" id="codeHint">A random 4-digit code is created for you.</div>
-    </div>` : ''}
-    ${num('s_ppt', 'Players per team', st.playersPerTeam, 1, 30, 'e.g. 5 = 5v5, 10 names per game')}
-    ${num('s_min', 'Game length (minutes)', st.gameMinutes, 1, 180)}
-    ${unl('s_boards', 'Boards in the line', st.maxBoards, 50, "Like whiteboards: waiting games shown at once. The game on the field doesn't count.")}
-    ${unl('s_signups', 'Sign-ups per person', st.maxSignups, 50, 'How many games one person can be on at a time')}
-    ${num('s_fields', 'Games at the same time', st.fields, 1, 10, 'Number of fields in use')}
-    ${num('s_warn', 'Heads-up alert (min before end)', st.warnMinutes, 0, 30, '0 = off. Pings the next game to get ready')}
-    <div><label for="s_pin">New games: pinnies go to</label>
-      <select id="s_pin"><option value="a" ${st.defaultPinnies === 'a' ? 'selected' : ''}>Team 1</option><option value="b" ${st.defaultPinnies === 'b' ? 'selected' : ''}>Team 2</option></select></div>
-    <div class="full stack">
-      <label class="check"><input type="checkbox" id="s_pick" ${st.allowTeamPick ? 'checked' : ''}> Players choose their own team</label>
-      <label class="check"><input type="checkbox" id="s_leave" ${st.allowLeave ? 'checked' : ''}> Players can take their own name off a game</label>
+/* ---------------- event settings editor (−/+ steppers, No-limit switches) ---------------- */
+const STEP_LISTS = {
+  s_min: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 75, 90, 105, 120, 150, 180]
+};
+function stepValText(id, v) {
+  if (id === 's_min') return `${v} min`;
+  if (id === 's_warn') return v === 0 ? 'Off' : `${v} min`;
+  if (id === 's_friends') return v === 0 ? 'Off' : String(v);
+  return String(v);
+}
+function stepHint(id, v) {
+  if (id === 's_ppt') return `${v}v${v} · ${v * 2} names per game`;
+  return null;
+}
+function stepperRow(id, title, hint, val, { min, max, less, more, unl = null, unlLabel = '' }) {
+  const off = unl === true;
+  const shown = val ?? (id === 's_boards' ? 3 : 1);
+  return `<div class="set-row-wrap">
+    <div class="set-row">
+      <div class="set-text"><span class="set-title">${title}</span>${hint ? `<span class="set-hint" id="${id}_hint">${stepHint(id, shown) || hint}</span>` : ''}</div>
+      <div class="stepper ${off ? 'off' : ''}" data-id="${id}" data-min="${min}" data-max="${max}" data-val="${shown}">
+        <button type="button" data-step="-1" aria-label="${less}" ${off ? 'disabled' : ''}>−</button>
+        <output id="${id}" aria-live="polite">${off ? '∞' : stepValText(id, shown)}</output>
+        <button type="button" data-step="1" aria-label="${more}" ${off ? 'disabled' : ''}>+</button>
+      </div>
     </div>
-    ${themeFields(st.theme)}`;
+    ${unl !== null ? `<div class="set-sub"><span>No limit</span><button type="button" role="switch" class="switch" id="${id}Unl" data-for="${id}" aria-checked="${off}" aria-label="${unlLabel}"></button></div>` : ''}
+  </div>`;
+}
+function switchRow(id, title, on) {
+  return `<div class="set-row"><span class="set-title">${title}</span><button type="button" role="switch" class="switch" id="${id}" aria-checked="${!!on}" aria-label="${title}"></button></div>`;
+}
+function settingsFields(st) {
+  const friends = st.maxFriends === undefined ? null : st.maxFriends;
+  return `
+    <section class="set-group"><h3>Games</h3>
+      ${stepperRow('s_ppt', 'Players per team', 'names per game', st.playersPerTeam, { min: 1, max: 30, less: 'Fewer players per team', more: 'More players per team' })}
+      ${stepperRow('s_min', 'Game length', 'Timer for each game', st.gameMinutes, { min: 1, max: 180, less: 'Shorter games', more: 'Longer games' })}
+      ${stepperRow('s_fields', 'Games at once', 'Fields in use', st.fields, { min: 1, max: 10, less: 'Fewer fields', more: 'More fields' })}
+    </section>
+    <section class="set-group"><h3>The line</h3>
+      ${stepperRow('s_boards', 'Boards in the line', "Like whiteboards — the game on the field doesn't count", st.maxBoards, { min: 1, max: 50, less: 'Fewer boards', more: 'More boards', unl: st.maxBoards === null, unlLabel: 'No limit on boards' })}
+      ${stepperRow('s_signups', 'Sign-ups per person', 'Games one person can be on at a time', st.maxSignups, { min: 1, max: 50, less: 'Fewer sign-ups', more: 'More sign-ups', unl: st.maxSignups === null, unlLabel: 'No limit on sign-ups' })}
+      ${stepperRow('s_friends', 'Friends each player can add', "0 = off · they get their friends' alerts", friends ?? 1, { min: 0, max: 50, less: 'Fewer friends', more: 'More friends', unl: friends === null, unlLabel: 'No limit on friends' })}
+    </section>
+    <section class="set-group"><h3>Teams</h3>
+      <div class="set-row"><span class="set-title">Pinnies go to</span>
+        <div class="seg pin-seg" id="s_pin" role="group" aria-label="Pinnies go to">
+          <button type="button" data-v="a" aria-pressed="${st.defaultPinnies !== 'b'}">Team 1</button>
+          <button type="button" data-v="b" aria-pressed="${st.defaultPinnies === 'b'}">Team 2</button>
+        </div>
+      </div>
+      ${switchRow('s_pick', 'Players pick their own team', st.allowTeamPick)}
+      ${switchRow('s_leave', 'Players can take their name off', st.allowLeave)}
+    </section>
+    <section class="set-group"><h3>Alerts</h3>
+      ${stepperRow('s_warn', 'Heads-up before a game ends', 'Tells the next game to warm up', st.warnMinutes, { min: 0, max: 30, less: 'Earlier heads-up', more: 'Later heads-up' })}
+    </section>
+    <section class="set-group"><h3>Colors</h3>
+      ${themeFields(st.theme)}
+      <p class="set-note">Tip: match "Pinnies" to your real bibs.</p>
+    </section>`;
 }
 function wireSettings(root) {
   wireTheme(root);
-  for (const id of ['s_boards', 's_signups']) {
-    const box = $('#' + id + 'Unl', root), inp = $('#' + id, root);
-    box.onchange = () => { inp.disabled = box.checked; if (!box.checked && !inp.value) inp.value = id === 's_boards' ? 3 : 1; };
-  }
-  const seg = $('#codeSeg', root);
-  if (seg) {
-    $$('[data-ct]', seg).forEach(b => b.onclick = () => {
-      $$('[data-ct]', seg).forEach(x => x.setAttribute('aria-pressed', x === b));
-      const custom = b.dataset.ct === 'custom';
-      $('#customCode', root).classList.toggle('hidden', !custom);
-      $('#customCode', root).required = custom;
-      $('#codeHint', root).textContent = custom ? 'Players type this password to join (4–32 characters).' : 'A random 4-digit code is created for you.';
-      if (custom) $('#customCode', root).focus();
+  const changed = () => root.dispatchEvent(new Event('settingschange'));
+  $$('.stepper', root).forEach(st => {
+    const id = st.dataset.id, min = +st.dataset.min, max = +st.dataset.max;
+    const list = STEP_LISTS[id];
+    const set = v => {
+      st.dataset.val = v;
+      $('output', st).textContent = stepValText(id, v);
+      const h = stepHint(id, v); if (h && $('#' + id + '_hint', root)) $('#' + id + '_hint', root).textContent = h;
+      changed();
+    };
+    $$('[data-step]', st).forEach(b => b.onclick = () => {
+      const cur = +st.dataset.val, dir = +b.dataset.step;
+      let next;
+      if (list) {
+        const i = list.findIndex(x => x >= cur);
+        next = dir > 0 ? list[Math.min(list.length - 1, list[i] === cur ? i + 1 : i)] : list[Math.max(0, (i === -1 ? list.length : i) - 1)];
+        if (next === undefined) next = cur;
+      } else next = cur + dir;
+      set(Math.min(max, Math.max(min, next)));
     });
-  }
+  });
+  $$('.switch', root).forEach(sw => sw.onclick = () => {
+    const on = sw.getAttribute('aria-checked') !== 'true';
+    sw.setAttribute('aria-checked', on);
+    if (sw.dataset.for) {
+      const st = $(`.stepper[data-id="${sw.dataset.for}"]`, root);
+      st.classList.toggle('off', on);
+      $$('button', st).forEach(b => { b.disabled = on; });
+      $('output', st).textContent = on ? '∞' : stepValText(st.dataset.id, +st.dataset.val);
+    }
+    changed();
+  });
+  const pin = $('#s_pin', root);
+  if (pin) $$('button', pin).forEach(b => b.onclick = () => {
+    $$('button', pin).forEach(x => x.setAttribute('aria-pressed', x === b));
+    changed();
+  });
 }
 function readSettings(root) {
-  const n = id => Number($('#' + id, root).value);
+  const val = id => +$(`.stepper[data-id="${id}"]`, root).dataset.val;
+  const unl = id => $('#' + id + 'Unl', root).getAttribute('aria-checked') === 'true';
+  const on = id => $('#' + id, root).getAttribute('aria-checked') === 'true';
   return {
-    playersPerTeam: n('s_ppt'),
-    gameMinutes: n('s_min'),
-    maxBoards: $('#s_boardsUnl', root).checked ? null : n('s_boards'),
-    maxSignups: $('#s_signupsUnl', root).checked ? null : n('s_signups'),
-    fields: n('s_fields'),
-    warnMinutes: n('s_warn'),
-    defaultPinnies: $('#s_pin', root).value,
-    allowTeamPick: $('#s_pick', root).checked,
-    allowLeave: $('#s_leave', root).checked,
+    playersPerTeam: val('s_ppt'),
+    gameMinutes: val('s_min'),
+    fields: val('s_fields'),
+    maxBoards: unl('s_boards') ? null : val('s_boards'),
+    maxSignups: unl('s_signups') ? null : val('s_signups'),
+    maxFriends: unl('s_friends') ? null : val('s_friends'),
+    warnMinutes: val('s_warn'),
+    defaultPinnies: $('#s_pin [aria-pressed=true]', root)?.dataset.v || 'a',
+    allowTeamPick: on('s_pick'),
+    allowLeave: on('s_leave'),
     theme: readTheme(root)
   };
 }
-const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, fields: 1, warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: false, allowLeave: true };
+// One-line chips summarizing an event's settings.
+function settingsChips(st) {
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const t = st.theme && st.theme.main ? st.theme : DEFAULT_THEME;
+  const tname = (THEMES.find(x => x.id === t.preset) || { name: 'My colors' }).name;
+  const friends = st.maxFriends === undefined ? null : st.maxFriends;
+  const chips = [
+    `${st.playersPerTeam}v${st.playersPerTeam}`,
+    `${st.gameMinutes} min games`,
+    st.maxBoards === null ? 'Unlimited line' : `${plural(st.maxBoards, 'board')} in the line`,
+    st.maxSignups === null ? 'Unlimited sign-ups' : `${plural(st.maxSignups, 'sign-up')} each`,
+    friends === null ? 'Friends: no limit' : friends === 0 ? 'Friends: off' : `Friends: up to ${friends}`,
+    st.warnMinutes ? `Heads-up ${st.warnMinutes} min` : 'No heads-up',
+    `Pinnies: Team ${st.defaultPinnies === 'b' ? 2 : 1}`
+  ];
+  if (st.fields > 1) chips.splice(2, 0, `${st.fields} games at once`);
+  if (st.allowTeamPick) chips.push('Players pick teams');
+  if (!st.allowLeave) chips.push("Can't take name off");
+  return chips.map(c => `<span class="chip">${esc(c)}</span>`).join('') +
+    `<span class="chip">${chipsHtml(t)}${esc(tname)}</span>`;
+}
+const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1, warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: false, allowLeave: true };
 
-async function managerHomeView({ startNew = false } = {}) {
+/* ---------------- organizer home: live → new event → ended ---------------- */
+const chev = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"></path></svg>';
+const plusIcon = '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M10 4v12M4 10h12"></path></svg>';
+function startedText(ts) {
+  const d = new Date(ts), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === now.toDateString() ? `Started ${time}` : `Started ${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+async function managerHomeView() {
   app.innerHTML = '<div class="spinner"></div>';
   let me;
   try { me = await mapi('GET', '/api/manager/me'); }
@@ -923,50 +1121,151 @@ async function managerHomeView({ startNew = false } = {}) {
   topnav.innerHTML = `<span class="who">${esc(me.username)}</span><button id="logout">Sign out</button>`;
   $('#logout').onclick = async () => { await mapi('POST', '/api/manager/logout').catch(() => {}); store.del('nu.manager'); route(); };
 
-  const saved = store.get('nu.lastSettings') || DEFAULTS;
-  // Live events first, then most recent
-  const events = me.events.slice().sort((a, b) => (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1) || b.createdAt - a.createdAt);
-  app.innerHTML = `
-    <h2 class="section-title" style="margin-top:4px">Your events
-      ${events.length ? '<a class="btn small" href="#newEvCard" id="jumpNew">+ New event</a>' : ''}</h2>
-    <div class="ev-list">${events.length ? events.map(e => `
-      <div class="card ev-item">
-        <div class="grow">
-          <h3>${esc(e.name)}</h3>
-          <div class="muted small">${e.status === 'active' ? `Code <b>${esc(e.code)}</b> · ` : ''}${e.players} players · ${e.gamesPlayed} games played · ${new Date(e.createdAt).toLocaleDateString()}</div>
-        </div>
-        <span class="pill ${e.status === 'active' ? '' : 'ended'}">${e.status === 'active' ? 'Live' : 'Ended'}</span>
-        <a class="btn small" href="#/manager/e/${e.id}">Open</a>
-      </div>`).join('') : '<div class="empty">No events yet. Create your first one below.</div>'}</div>
+  if (!me.events.length) {
+    app.innerHTML = `<section class="empty-home">
+      <svg width="150" height="110" viewBox="0 0 150 110" fill="none" role="img" aria-label="Three empty sign-up boards">
+        <rect x="6" y="18" width="42" height="56" rx="6" stroke="currentColor" stroke-width="2.5"></rect>
+        <rect x="54" y="10" width="42" height="64" rx="6" stroke="currentColor" stroke-width="2.5" fill="var(--surface)"></rect>
+        <rect x="102" y="18" width="42" height="56" rx="6" stroke="currentColor" stroke-width="2.5"></rect>
+        <path d="M62 24h26M62 34h20M62 44h24M62 54h16" stroke="var(--ink-3)" stroke-width="2.5" stroke-linecap="round"></path>
+        <path d="M27 74v18M75 74v26M123 74v18" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"></path>
+      </svg>
+      <h1>No events yet</h1>
+      <p>Make an event, share the code, and the whiteboards run themselves.</p>
+      <a class="btn primary block big" href="#/manager/new">${plusIcon} New event</a>
+      <p class="small muted">Players don't need an account — they join with the code and their name.</p>
+    </section>
+    <p class="muted small" style="text-align:center">Here to play? <a href="#/">Join a game as a player</a></p>`;
+    return;
+  }
 
-    <h2 class="section-title">Create an event</h2>
-    <section class="card" id="newEvCard">
-      <form id="newEv" class="stack">
-        <div><label for="evname">Event name</label><input id="evname" maxlength="60" placeholder="Tuesday night pickup" required></div>
-        <div class="settings-grid">${settingsFields(saved, true)}</div>
-        <button class="btn primary block" type="submit">Create event</button>
-        <p class="err" id="newErr"></p>
-      </form>
-    </section>`;
-  const goNew = () => { $('#newEvCard').scrollIntoView({ behavior: 'smooth' }); setTimeout(() => $('#evname').focus({ preventScroll: true }), 400); };
-  const jump = $('#jumpNew');
-  if (jump) jump.onclick = e => { e.preventDefault(); goNew(); };
-  if (startNew) { history.replaceState(null, '', '#/manager'); setTimeout(goNew, 50); }
+  const newest = (a, b) => b.createdAt - a.createdAt;
+  const liveEvents = me.events.filter(e => e.status === 'active').sort(newest);
+  const endedEvents = me.events.filter(e => e.status !== 'active').sort(newest);
+  const hasSaved = !!store.get('nu.lastSettings');
+  const liveCard = e => `
+    <article class="live-card">
+      <div class="live-top">
+        <div class="row" style="justify-content:space-between">
+          <span class="live-pill"><span></span>Live</span>
+          <span class="muted small">${startedText(e.createdAt)}</span>
+        </div>
+        <h3>${esc(e.name)}</h3>
+        <div class="live-stats">
+          <div><span>${e.codeType === 'custom' ? 'Password' : 'Code'}</span><b class="${e.codeType === 'custom' ? 'pw' : 'code'}">${esc(e.code)}</b></div>
+          <div><span>Players</span><b>${e.players}</b></div>
+          <div><span>Played</span><b>${e.gamesPlayed}</b></div>
+        </div>
+      </div>
+      <a class="live-open" href="#/manager/e/${e.id}">Open event <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"></path></svg></a>
+    </article>`;
+  const endedRow = e => {
+    const d = new Date(e.createdAt).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+    return `<a class="ended-row" href="#/manager/e/${e.id}">
+      <span class="grow"><b>${esc(e.name)}</b><span>${d} · ${e.gamesPlayed} game${e.gamesPlayed === 1 ? '' : 's'} · ${e.players} player${e.players === 1 ? '' : 's'}</span></span>${chev}</a>`;
+  };
+  app.innerHTML = `
+    ${liveEvents.length ? `<h2 class="section-title" style="margin-top:4px">Live now</h2>
+      <div class="ev-list">${liveEvents.map(liveCard).join('')}</div>` : ''}
+    <a class="new-cta" href="#/manager/new" style="${liveEvents.length ? '' : 'margin-top:4px'}">
+      <span class="new-cta-icon">${plusIcon}</span>
+      <span class="grow"><b>New event</b><span>${hasSaved ? 'Same settings as last time' : 'Pick a name and go'}</span></span>${chev}
+    </a>
+    ${endedEvents.length ? `<div class="section-title"><span>Ended</span><span class="muted small" style="text-transform:none;font-family:var(--font)">${endedEvents.length} event${endedEvents.length === 1 ? '' : 's'}</span></div>
+      <nav class="ended-list" aria-label="Ended events">${endedEvents.map(endedRow).join('')}</nav>` : ''}`;
+}
+
+/* ---------------- new event page ---------------- */
+async function newEventView() {
+  topnav.innerHTML = `<a href="#/manager">← Your events</a>`;
+  const last = store.get('nu.lastSettings');
+  const saved = { ...DEFAULTS, ...(last || {}) };
+  app.innerHTML = `
+    <div class="page-head">
+      <a class="back" href="#/manager" aria-label="Back to your events"><svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.5L7.5 11l6.5 6.5"></path></svg></a>
+      <h1>New event</h1>
+    </div>
+    <form id="newEv" class="newev" novalidate autocomplete="off">
+      <div class="field">
+        <label for="evname">Event name</label>
+        <input id="evname" maxlength="60" placeholder="Thursday night pickup">
+      </div>
+      <div class="field">
+        <span class="lbl" id="joinLbl">How players join</span>
+        <div class="seg seg-full" id="codeSeg" role="group" aria-labelledby="joinLbl">
+          <button type="button" data-ct="pin" aria-pressed="true">4-digit code</button>
+          <button type="button" data-ct="custom" aria-pressed="false">Custom password</button>
+        </div>
+        <input id="customCode" class="hidden" maxlength="32" placeholder="e.g. tuesdayfooty" autocapitalize="none" aria-label="Custom password">
+        <span class="field-hint" id="codeHint">A random code is made for you — share it or show the QR.</span>
+      </div>
+
+      <section class="set-summary" id="setSummary" aria-label="Game settings">
+        <div class="sum-head">
+          <div><b>Game settings</b><span id="sumSub">${last ? 'Same as your last event' : 'Standard settings'}</span></div>
+          ${last ? '<span class="saved-pill" id="savedPill">✓ Saved</span>' : ''}
+        </div>
+        <div class="sum-chips" id="sumChips">${settingsChips(saved)}</div>
+        <button type="button" class="set-link" id="openSet" aria-expanded="false" aria-controls="setEditor">Change settings<span aria-hidden="true">›</span></button>
+      </section>
+
+      <div id="setEditor" class="set-editor hidden">
+        <div class="set-head"><h2>Game settings</h2><button type="button" class="linkbtn" id="closeSet">Done</button></div>
+        ${settingsFields(saved)}
+      </div>
+
+      <p class="err" id="newErr"></p>
+      <div class="startbar">
+        <button class="btn primary block big" type="submit" id="startBtn">Start event</button>
+        <span id="startHint">You'll get a join code and QR code to share.</span>
+      </div>
+    </form>`;
 
   const form = $('#newEv');
   wireSettings(form);
+  let edited = false;
+  form.addEventListener('settingschange', () => {
+    edited = true;
+    $('#sumChips').innerHTML = settingsChips(readSettings(form));
+  });
+  const seg = $('#codeSeg');
+  $$('[data-ct]', seg).forEach(b => b.onclick = () => {
+    $$('[data-ct]', seg).forEach(x => x.setAttribute('aria-pressed', x === b));
+    const custom = b.dataset.ct === 'custom';
+    $('#customCode').classList.toggle('hidden', !custom);
+    $('#codeHint').textContent = custom ? 'Players type this password to join (4–32 characters).' : 'A random code is made for you — share it or show the QR.';
+    if (custom) $('#customCode').focus();
+  });
+  const showEditor = open => {
+    $('#setEditor').classList.toggle('hidden', !open);
+    $('#setSummary').classList.toggle('hidden', open);
+    $('#openSet').setAttribute('aria-expanded', open);
+    $('#startHint').textContent = open ? 'These become your settings for next time too.' : "You'll get a join code and QR code to share.";
+    if (!open && edited) {
+      $('#sumSub').textContent = 'Changed for this event';
+      const pill = $('#savedPill'); if (pill) pill.remove();
+    }
+    (open ? $('#setEditor') : $('#setSummary')).scrollIntoView({ block: 'start', behavior: 'smooth' });
+  };
+  $('#openSet').onclick = () => showEditor(true);
+  $('#closeSet').onclick = () => showEditor(false);
+
   form.onsubmit = async e => {
     e.preventDefault();
-    const settings = readSettings(form);
+    const err = $('#newErr'); err.textContent = '';
+    const name = $('#evname').value.trim();
     const custom = $('[data-ct="custom"]', form).getAttribute('aria-pressed') === 'true';
+    if (!name) { err.textContent = 'Give your event a name'; $('#evname').focus(); return; }
+    if (custom && $('#customCode').value.trim().length < 4) { err.textContent = 'Custom password must be 4–32 characters'; $('#customCode').focus(); return; }
+    const btn = $('#startBtn'); btn.disabled = true;
+    const settings = readSettings(form);
     try {
-      const r = await mapi('POST', '/api/manager/events', {
-        name: $('#evname').value, codeType: custom ? 'custom' : 'pin', code: $('#customCode').value, settings
-      });
+      const r = await mapi('POST', '/api/manager/events', { name, codeType: custom ? 'custom' : 'pin', code: $('#customCode').value, settings });
       store.set('nu.lastSettings', settings);
       location.hash = '#/manager/e/' + r.id;
-    } catch (ex) { $('#newErr').textContent = ex.message; }
+    } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
   };
+  $('#evname').focus();
 }
 
 async function managerEventView(eventId) {
@@ -1095,7 +1394,7 @@ async function managerEventView(eventId) {
       <div class="dlg-head"><h2>Event settings</h2><button class="iconbtn" value="cancel" aria-label="Close">✕</button></div>
       <div class="dlg-body stack">
         <div><label for="s_name">Event name</label><input id="s_name" maxlength="60" value="${esc(s.name)}"></div>
-        <div class="settings-grid">${settingsFields(s.settings, false)}</div>
+        <div class="set-editor">${settingsFields(s.settings)}</div>
         <p class="field-hint">Changes apply right away. A new game length applies to games that haven't started.</p>
       </div>
       <div class="dlg-foot"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="save" id="saveSet">Save</button></div>
@@ -1236,7 +1535,7 @@ function renderManager(s) {
     <section class="card">
       ${s.roster.length ? `<ul class="roster">${s.roster.map(p => `
         <li><span class="dot ${p.alerts ? 'on' : ''}" title="${p.alerts ? 'Alerts on' : 'No alerts'}"></span>
-          <span class="nm">${esc(p.name)}${p.guest ? ' <span class="muted small">(walk-up)</span>' : ''}</span>
+          <span class="nm">${esc(p.name)}${p.guest ? ` <span class="muted small">(${p.addedBy ? 'friend of ' + esc(p.addedBy) : 'walk-up'})</span>` : ''}</span>
           <span class="muted small">${p.signups} game${p.signups === 1 ? '' : 's'}</span>
           ${p.guest ? '' : `<button class="btn small" data-act="release" data-pid="${p.id}" title="Free up this name">Sign out</button>`}
           <button class="btn small danger" data-act="kick" data-pid="${p.id}">Remove</button></li>`).join('')}</ul>`
@@ -1271,13 +1570,20 @@ function route() {
   const h = location.hash.replace(/^#/, '') || '/';
   let m;
   window.scrollTo(0, 0);
+  // Logo: organizer screens go to the organizer home (your events); player screens go to the join page.
+  const brand = document.querySelector('.brand');
+  if (brand) {
+    const org = h.startsWith('/manager');
+    brand.setAttribute('href', org ? '#/manager' : '#/');
+    brand.setAttribute('aria-label', org ? 'Next Up — your events' : 'Next Up home');
+  }
   if ((m = h.match(/^\/e\/([\w-]+)$/))) return playerView(m[1]);
   if ((m = h.match(/^\/join\/(.+)$/))) return homeView(decodeURIComponent(m[1]));
   if (h === '/install') return installView();
   if ((m = h.match(/^\/install\/(.+)$/))) return installView(decodeURIComponent(m[1]));
   if ((m = h.match(/^\/manager\/e\/([\w-]+)$/))) return mgrSession() ? managerEventView(m[1]) : managerAuthView();
   if (h === '/manager') return mgrSession() ? managerHomeView() : managerAuthView();
-  if (h === '/manager/new') return mgrSession() ? managerHomeView({ startNew: true }) : managerAuthView();
+  if (h === '/manager/new') return mgrSession() ? newEventView() : managerAuthView();
   return homeView();
 }
 

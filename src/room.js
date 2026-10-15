@@ -9,7 +9,7 @@ import { sendPush } from './webpush.js';
 const PUSH_BATCH = 40; // stay under the free plan's 50 outgoing requests per run
 
 const DEFAULT_SETTINGS = {
-  playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, fields: 1,
+  playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1,
   warnMinutes: 2, allowTeamPick: false, allowLeave: true, defaultPinnies: 'a',
   theme: { preset: 'pitch', main: '#1f8a5b', accent: '#c6f24e', pinnie: '#ff7a1a' }
 };
@@ -27,6 +27,11 @@ function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
   if ('gameMinutes' in input) set('gameMinutes', int(input.gameMinutes, 1, 180));
   if ('maxBoards' in input) s.maxBoards = unlimited(input.maxBoards) ? null : (int(input.maxBoards, 1, 50) ?? s.maxBoards);
   if ('maxSignups' in input) s.maxSignups = unlimited(input.maxSignups) ? null : (int(input.maxSignups, 1, 50) ?? s.maxSignups);
+  // friends each player can add: null = unlimited, 0 = off
+  if ('maxFriends' in input) {
+    const v = input.maxFriends;
+    s.maxFriends = (v === null || v === 'unlimited' || v === '') ? null : (int(v, 0, 50) ?? s.maxFriends);
+  }
   if ('fields' in input) set('fields', int(input.fields, 1, 10));
   if ('warnMinutes' in input) set('warnMinutes', int(input.warnMinutes, 0, 30));
   if ('allowTeamPick' in input) s.allowTeamPick = !!input.allowTeamPick;
@@ -119,7 +124,7 @@ export class EventRoom extends DurableObject {
     return {
       id: ev.id, name: ev.name, code: ev.code, codeType: ev.codeType, status: ev.status,
       closing: !!ev.closing, settings: ev.settings, serverNow: Date.now(),
-      players: Object.fromEntries(Object.values(ev.players).map(p => [p.id, { id: p.id, name: p.name, guest: !!p.guest }])),
+      players: Object.fromEntries(Object.values(ev.players).map(p => [p.id, { id: p.id, name: p.name, guest: !!p.guest, addedBy: (p.guest && p.addedBy) || null }])),
       games: ev.games.map(g => ({
         id: g.id, number: g.number, status: g.status, teams: g.teams, pinnies: g.pinnies,
         timer: g.timer, timeUp: !!g.timeUp, startedAt: g.startedAt || null
@@ -131,7 +136,7 @@ export class EventRoom extends DurableObject {
     const ev = this.ev;
     const s = this.publicState();
     s.roster = Object.values(ev.players)
-      .map(p => ({ id: p.id, name: p.name, guest: !!p.guest, alerts: p.subs.length > 0, signups: activeSignups(ev, p.id), joinedAt: p.joinedAt }))
+      .map(p => ({ id: p.id, name: p.name, guest: !!p.guest, addedBy: (p.guest && p.addedBy && ev.players[p.addedBy]?.name) || null, alerts: p.subs.length > 0, signups: activeSignups(ev, p.id), joinedAt: p.joinedAt }))
       .sort((a, b) => a.name.localeCompare(b.name));
     s.managerAlerts = ev.managerSubs.length;
     return s;
@@ -186,6 +191,13 @@ export class EventRoom extends DurableObject {
     const payload = { title, body, tag: tag || 'nextup-' + ev.id, url: `/#/e/${ev.id}` };
     this.sendTo('p:' + pid, { type: 'notice', data: payload });
     if (p.subs.length) this.queuePush(p.subs, payload, pid);
+    // A friend who isn't on their own phone: tell the person who added them.
+    const host = p.guest && p.addedBy && ev.players[p.addedBy];
+    if (host) {
+      const fwd = { title: `For ${p.name}: ${title}`, body, tag: (tag || 'nextup-' + ev.id) + '-' + pid, url: payload.url };
+      this.sendTo('p:' + host.id, { type: 'notice', data: fwd });
+      if (host.subs.length) this.queuePush(host.subs, fwd, host.id);
+    }
   }
   notifyManager(title, body) {
     const ev = this.ev;
@@ -360,9 +372,21 @@ export class EventRoom extends DurableObject {
       if (!name) fail(400, 'Enter your name');
       let p = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
       if (p && !p.guest) fail(409, `Someone is already signed in as "${p.name}". If that's you in your browser, open Next Up there and tap "Get my move code". Otherwise add a last initial (e.g. "${name} B.") or ask the organizer to free up the name.`);
+      // Name was put on the list by a friend (or the organizer): make sure it's really them first.
+      if (p && p.guest && (p.addedBy || p.walkup) && !b.confirmClaim) {
+        const spots = ev.games.filter(g => gamePlayers(g).includes(p.id)).map(g => ({
+          number: g.number, team: g.teams.a.includes(p.id) ? 1 : 2, playing: g.status === 'playing'
+        }));
+        if (spots.length) {
+          const host = p.addedBy && ev.players[p.addedBy];
+          return { needsConfirm: true, name: p.name, addedBy: host ? host.name : null, games: spots };
+        }
+      }
       const isNew = !p;
       if (!p) { p = { id: newId(6), name, guest: false, subs: [], joinedAt: Date.now() }; ev.players[p.id] = p; }
       p.guest = false;
+      delete p.addedBy; // a friend who joins on their own phone takes over their spot
+      delete p.walkup;
       const token = newId(18);
       ev.tokens[token] = p.id;
       await this.commit();
@@ -432,6 +456,53 @@ export class EventRoom extends DurableObject {
         if (!gamePlayers(g).includes(p.id)) fail(404, "You're not on that game");
         removeFromGame(g, p.id);
         ensureOpenBoard(ev);
+        await this.commit();
+        return { ok: true };
+      }
+      if (method === 'POST' && (m = path.match(/^\/p\/games\/([\w-]+)\/friend$/))) {
+        if (ev.status !== 'active') fail(409, 'This event has ended');
+        const maxF = ev.settings.maxFriends === undefined ? null : ev.settings.maxFriends;
+        if (maxF === 0) fail(403, "Adding friends is turned off for this event");
+        const g = findGame(ev, m[1]);
+        if (g.status !== 'open') fail(409, 'That game already started');
+        const name = cleanName(b.name);
+        if (!name) fail(400, "Enter your friend's name");
+        if (name.toLowerCase() === p.name.toLowerCase()) fail(400, "That's your own name — use \"Put my name down\" instead");
+        let f = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
+        if (f && !f.guest) fail(409, `${f.name} is signed in on their own phone — they can put their name down themselves`);
+        if (f && f.addedBy && f.addedBy !== p.id && ev.players[f.addedBy]) fail(409, `${f.name} was already added by ${ev.players[f.addedBy].name}`);
+        const myFriends = Object.values(ev.players).filter(x => x.guest && x.addedBy === p.id);
+        if (!f && maxF !== null && myFriends.length >= maxF) fail(409, maxF === 1 ? 'You can add 1 friend at this event' : `You can add up to ${maxF} friends at this event`);
+        if (f && gamePlayers(g).includes(f.id)) fail(409, `${f.name} is already on Game ${g.number}`);
+        const maxS = ev.settings.maxSignups;
+        if (f && maxS !== null && activeSignups(ev, f.id) >= maxS) fail(409, `${f.name} is already on ${maxS === 1 ? 'a game' : maxS + ' games'}`);
+        if (isFull(ev, g)) fail(409, 'That game is full');
+        const team = pickTeam(ev, g, b.team);
+        if (!f) { f = { id: newId(6), name, guest: true, subs: [], joinedAt: Date.now() }; ev.players[f.id] = f; }
+        f.addedBy = p.id;
+        g.teams[team].push(f.id);
+        ensureOpenBoard(ev);
+        this.checkUpNext();
+        await this.commit();
+        await this.syncSummary();
+        return { ok: true, team, friendId: f.id };
+      }
+      if (method === 'POST' && (m = path.match(/^\/p\/games\/([\w-]+)\/friends\/([\w-]+)\/(switch|remove)$/))) {
+        const g = findGame(ev, m[1]);
+        const f = ev.players[m[2]];
+        if (!f || !f.guest || f.addedBy !== p.id) fail(403, 'You can only change friends you added');
+        if (!gamePlayers(g).includes(f.id)) fail(404, `${f.name} is not on that game`);
+        if (g.status !== 'open') fail(409, 'That game already started — ask the organizer');
+        if (m[3] === 'remove') {
+          removeFromGame(g, f.id);
+          ensureOpenBoard(ev);
+        } else {
+          const from = g.teams.a.includes(f.id) ? 'a' : 'b';
+          const to = from === 'a' ? 'b' : 'a';
+          if (g.teams[to].length >= teamCap(ev)) fail(409, `Team ${to === 'a' ? 1 : 2} is full`);
+          g.teams[from] = g.teams[from].filter(x => x !== f.id);
+          g.teams[to].push(f.id);
+        }
         await this.commit();
         return { ok: true };
       }
@@ -583,7 +654,7 @@ export class EventRoom extends DurableObject {
         const name = cleanName(b.name);
         if (!name) fail(400, 'Enter a name');
         let p = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
-        if (!p) { p = { id: newId(6), name, guest: true, subs: [], joinedAt: Date.now() }; ev.players[p.id] = p; }
+        if (!p) { p = { id: newId(6), name, guest: true, walkup: true, subs: [], joinedAt: Date.now() }; ev.players[p.id] = p; }
         if (gamePlayers(g).includes(p.id)) fail(409, `${p.name} is already on Game ${g.number}`);
         const team = pickTeam(ev, g, b.team);
         g.teams[team].push(p.id);
@@ -623,6 +694,7 @@ export class EventRoom extends DurableObject {
         else {
           for (const g of ev.games) removeFromGame(g, p.id);
           delete ev.players[p.id];
+          for (const x of Object.values(ev.players)) if (x.addedBy === p.id) delete x.addedBy;
           ensureOpenBoard(ev);
         }
         await this.commit();
