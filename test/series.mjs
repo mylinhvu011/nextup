@@ -63,7 +63,17 @@ const ymdUTC = ms => new Date(ms).toISOString().slice(0, 10);
     const d0 = Date.parse(sr.upcoming[0].date), d1 = Date.parse(sr.upcoming[1].date);
     assert.strictEqual((d1 - d0) / 864e5, 14, 'every 2 weeks');
     // code is the series' own: no one-off event can take it; the event can't change it
-    await err(call('POST', '/api/manager/events', { name: 'Clash', codeType: 'custom', code: sr.code }, M), 409);
+    assert.match(await err(call('POST', '/api/manager/events', { name: 'Clash', codeType: 'custom', code: sr.code }, M), 409), /Your repeating event "Weekly"/);
+    // a live one-off event's password: blocked while live (named), free again once it ends
+    const one = await ok(call('POST', '/api/manager/events', { name: 'Friday', codeType: 'custom', code: 'fridaypw' }, M));
+    assert.match(await err(call('POST', '/api/manager/events', { name: 'Dup', codeType: 'custom', code: 'FridayPW' }, M), 409), /Your live event "Friday"/);
+    assert.match(await err(call('POST', '/api/manager/series', { name: 'DupS', codeType: 'custom', code: 'fridaypw', settings: { tz }, schedule: { days: [1], startTime: '19:00' } }, M), 409), /Your live event "Friday"/);
+    await ok(call('POST', `/api/manager/events/${one.id}/end`, {}, M));
+    const again = await ok(call('POST', '/api/manager/events', { name: 'Friday 2', codeType: 'custom', code: 'fridaypw' }, M));
+    await ok(call('DELETE', `/api/manager/events/${again.id}`, null, M));
+    const again2 = await ok(call('POST', '/api/manager/series', { name: 'Fri weekly', codeType: 'custom', code: 'fridaypw', settings: { tz }, schedule: { days: [(today + 3) % 7], startTime: '19:00' } }, M));
+    await ok(call('DELETE', `/api/manager/series/${again2.id}`, null, M));
+    await ok(call('POST', '/api/manager/events', { name: 'Friday 3', codeType: 'custom', code: 'fridaypw' }, M));
     await err(call('POST', `/api/manager/events/${sr.liveEventId}/code`, { type: 'pin' }, M), 409);
 
     /* ---- between weeks the code says when it's next on ---- */
@@ -114,7 +124,7 @@ const ymdUTC = ms => new Date(ms).toISOString().slice(0, 10);
     await err(call('POST', '/api/join', { code: sr.code, checkOnly: true }), 404);
     await ok(call('POST', '/api/manager/events', { name: 'Now free', codeType: 'custom', code: sr.code }, M));
     const me2 = await ok(call('GET', '/api/manager/me', null, M));
-    assert.strictEqual(me2.series.length, 1);
+    assert.strictEqual(me2.series.length, 1); // only "Soon" left
     assert.ok(me2.events.some(e => e.seriesId === sr.id && e.status === 'ended'), 'past weeks stay in your events');
     console.log('series: all checks passed');
   } finally { try { process.kill(-srv.pid); } catch { srv.kill(); } }

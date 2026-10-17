@@ -229,18 +229,41 @@ export class Registry extends DurableObject {
   /* ---------- join codes ----------
      c:<code>  -> the live event using it right now
      cs:<code> -> a repeating event that owns it (kept between weeks so nobody else takes it) */
-  async codeTaken(c, { eventId = null, seriesId = null } = {}) {
+  // Who is really using a code right now: a live event, a repeating event, or nobody.
+  // Reservations whose event has ended, been deleted or moved to another code (or whose repeating
+  // event is gone) are stale — they're cleaned up here so the code is free again.
+  async codeHolder(c, { eventId = null, seriesId = null } = {}) {
     const owner = await this.ctx.storage.get('c:' + c);
-    if (owner && owner !== eventId) return true;
+    if (owner && owner !== eventId) {
+      let st = null;
+      try { st = await (await this.roomStub(owner).fetch('https://room/status')).json(); } catch (e) { console.error(e); }
+      if (!st) return { kind: 'event' }; // couldn't check: play safe
+      if (st.status === 'active' && normCode(st.code || '') === c) return { kind: 'event', name: st.name, managerId: st.managerId, seriesId: st.seriesId };
+      if ((await this.ctx.storage.get('c:' + c)) === owner) await this.ctx.storage.delete('c:' + c);
+    }
     const so = await this.ctx.storage.get('cs:' + c);
-    return !!(so && so !== seriesId);
+    if (so && so !== seriesId) {
+      const sr = await this.ctx.storage.get('sr:' + so);
+      if (sr && normCode(sr.code) === c) return { kind: 'series', name: sr.name, managerId: sr.managerId };
+      await this.ctx.storage.delete('cs:' + c);
+    }
+    return null;
+  }
+  async codeTaken(c, opts) { return !!(await this.codeHolder(c, opts)); }
+  takenError(h, managerId) {
+    if (h && h.managerId && h.managerId === managerId) {
+      if (h.kind === 'series' || h.seriesId) return err(409, `Your repeating event "${h.name}" uses that password — pick a different one, or stop repeating that event to free it`);
+      return err(409, `Your live event "${h.name}" is using that password — end it first, or pick a different one`);
+    }
+    return err(409, 'Another event is using that password — pick a different one');
   }
   // type 'pin' -> random free 4-digit code; type 'custom' -> validate + claim.
-  async reserveCode({ type, code, eventId, seriesId = null }) {
+  async reserveCode({ type, code, eventId, seriesId = null, managerId = null }) {
     if (type === 'custom') {
       const c = String(code || '').trim();
       if (c.length < 4 || c.length > 32) return err(400, 'Custom password must be 4–32 characters');
-      if (await this.codeTaken(normCode(c), { eventId, seriesId })) return err(409, 'Another event is using that password — pick a different one');
+      const h = await this.codeHolder(normCode(c), { eventId, seriesId });
+      if (h) return this.takenError(h, managerId);
       await this.ctx.storage.put('c:' + normCode(c), eventId);
       return { code: c, codeType: 'custom' };
     }
@@ -366,7 +389,8 @@ export class Registry extends DurableObject {
     if (codeType === 'custom') {
       c = String(code || '').trim();
       if (c.length < 4 || c.length > 32) return err(400, 'Custom password must be 4–32 characters');
-      if (await this.codeTaken(normCode(c), { seriesId: id })) return err(409, 'Another event is using that password — pick a different one');
+      const h = await this.codeHolder(normCode(c), { seriesId: id });
+      if (h) return this.takenError(h, managerId);
     } else {
       for (let i = 0; i < 300 && !c; i++) {
         const t = String(Math.floor(Math.random() * 10000)).padStart(4, '0');

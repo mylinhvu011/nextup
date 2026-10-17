@@ -104,7 +104,7 @@ async function handleApi(request, env) {
       const b = await readJson(request);
       const eventId = newId(9);
       const codeType = b.codeType === 'custom' ? 'custom' : 'pin';
-      const code = rpc(await registry.reserveCode({ type: codeType, code: b.code, eventId }));
+      const code = rpc(await registry.reserveCode({ type: codeType, code: b.code, eventId, managerId: mgr.id }));
       const res = await roomOf(env, eventId).fetch(new Request('https://room/init', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ eventId, managerId: mgr.id, name: b.name, code: code.code, codeType, settings: b.settings || {} })

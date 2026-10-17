@@ -383,6 +383,11 @@ export class EventRoom extends DurableObject {
 
   async route(method, path, b, headers) {
     // Event creation (called by the Worker after it reserved a code)
+    // Internal: lets the Registry check whether this event still holds its join code.
+    if (method === 'GET' && path === '/status') {
+      const ev = this.ev;
+      return ev ? { status: ev.status, code: ev.code, name: ev.name, managerId: ev.managerId, seriesId: ev.seriesId || null } : { status: 'none' };
+    }
     if (method === 'POST' && path === '/init') {
       if (this.ev) fail(409, 'Event exists');
       const ev = {
@@ -633,7 +638,7 @@ export class EventRoom extends DurableObject {
       if (method === 'POST' && path === '/m/code') {
         live();
         if (ev.seriesId) fail(409, 'This repeating event keeps the same code every time');
-        const r = await this.registry.reserveCode({ type: b.type === 'custom' ? 'custom' : 'pin', code: b.code, eventId: ev.id });
+        const r = await this.registry.reserveCode({ type: b.type === 'custom' ? 'custom' : 'pin', code: b.code, eventId: ev.id, managerId: ev.managerId });
         if (r.error) fail(r.status, r.error);
         if (r.code.toLowerCase() !== ev.code.toLowerCase()) await this.registry.releaseCode(ev.code, ev.id);
         ev.code = r.code; ev.codeType = r.codeType;
