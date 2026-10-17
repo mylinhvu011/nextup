@@ -334,7 +334,7 @@ export class EventRoom extends DurableObject {
       // Auto-close: events end on their own 12 hours after they open (organizers can extend).
       if (now >= this.closeAt(ev) - 500 && await this.endEvent(true)) {
         changed = true;
-        this.notifyManager(`${ev.name} closed automatically`, 'It reached its end time. Reopen it from your events if you still need it.');
+        this.notifyManager(`${ev.name} closed automatically`, 'It reached its end time and its code is free again. Start a new event if you need one.');
         try { await this.syncSummary(); } catch (e) { console.error(e); }
       }
     }

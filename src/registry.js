@@ -6,7 +6,7 @@ import { newId, normCode } from './util.js';
 import { generateVapidKeys, b64urlEncode, b64urlDecode } from './webpush.js';
 import { sendEmail, emailBody } from './email.js';
 import { cleanSettings } from './room.js';
-import { cleanSchedule, occurrences, closeAtFor, whenText } from './schedule.js';
+import { cleanSchedule, occurrences, closeAtFor, whenText, localDate, ymd } from './schedule.js';
 
 const SESSION_MS = 30 * 864e5;
 const PBKDF2_ITER = 100000; // Workers' maximum
@@ -433,15 +433,19 @@ export class Registry extends DurableObject {
     return this.seriesView(await this.ctx.storage.get('sr:' + id));
   }
 
-  // "Open it now": opens the next date early (or returns the one already running).
+  // "Open now": runs an event right now with the same code and settings. If today is one of the
+  // scheduled dates, that's today's date opening early; otherwise it's an extra event and every
+  // scheduled date stays on the calendar.
   async openSeriesNow({ managerId, id }) {
     const sr = await this.ownSeries(managerId, id);
     if (!sr) return err(404, 'Repeating event not found');
     const live = await this.liveEventOf(sr);
     if (live) return { eventId: live };
+    const today = ymd(localDate(Date.now(), sr.settings.tz));
     const o = this.nextOcc(sr, Date.now());
-    if (!o) return err(409, 'There are no more dates scheduled');
-    const eventId = await this.openOccurrence(sr, o);
+    const eventId = o && o.date === today
+      ? await this.openOccurrence(sr, o)
+      : await this.openOccurrence(sr, { date: today }, { extra: true });
     await this.tickSeries();
     return { eventId };
   }
@@ -456,7 +460,7 @@ export class Registry extends DurableObject {
     return { ok: true };
   }
 
-  async openOccurrence(sr, o) {
+  async openOccurrence(sr, o, { extra = false } = {}) {
     // Finish last week's if it's somehow still running, so the code moves to the new one.
     const prev = await this.liveEventOf(sr);
     if (prev) {
@@ -473,8 +477,8 @@ export class Registry extends DurableObject {
     }));
     if (!res.ok) { await this.ctx.storage.delete(key); throw new Error('Could not open ' + sr.name + ': ' + (await res.text())); }
     await this.putSummary(await res.json());
-    sr.lastDate = o.date; sr.currentEventId = eventId;
-    sr.skips = sr.skips.filter(d => d > o.date);
+    sr.currentEventId = eventId;
+    if (!extra) { sr.lastDate = o.date; sr.skips = sr.skips.filter(d => d > o.date); }
     await this.ctx.storage.put('sr:' + sr.id, sr);
     return eventId;
   }

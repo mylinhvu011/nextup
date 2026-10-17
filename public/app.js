@@ -1409,7 +1409,7 @@ async function managerHomeView() {
         </div>
       </div>
       <div class="series-actions">
-        ${sr.liveEventId ? `<a href="#/manager/e/${sr.liveEventId}">Go to event</a>` : sr.next ? `<button type="button" data-open-series="${sr.id}">Open it now</button>` : '<span></span>'}
+        ${sr.liveEventId ? `<a href="#/manager/e/${sr.liveEventId}">Go to event</a>` : `<button type="button" data-open-series="${sr.id}">Open it now</button>`}
         <a href="#/manager/s/${sr.id}">Manage ${chev}</a>
       </div>
     </article>`;
@@ -1433,6 +1433,7 @@ async function managerHomeView() {
 }
 
 /* ---------------- repeating event page ---------------- */
+const isScheduledToday = sr => !!(sr.next && sr.next.date === todayYmd());
 async function seriesPageView(id) {
   topnav.innerHTML = `<a href="#/manager">← Your events</a>`;
   app.innerHTML = '<div class="spinner"></div>';
@@ -1460,6 +1461,8 @@ async function seriesPageView(id) {
           <button class="btn small" id="srShare">Share</button>
         </div>
         <p class="field-hint">The code only works while a date is open. The rest of the time, players are told when it's next on.</p>
+        ${sr.liveEventId ? '' : `<button class="btn primary block" data-open-now style="margin-bottom:10px">Open an event now</button>
+        <p class="field-hint" style="margin-top:-4px">Starts one right away with this code and settings. ${isScheduledToday(sr) ? "Today's date opens early." : 'Your scheduled dates stay as they are.'}</p>`}
         <div class="row">
           <button class="btn small" id="srEdit">Edit name, days &amp; time</button>
           <button class="btn small" id="srSettings">⚙ Game settings</button>
@@ -1471,7 +1474,6 @@ async function seriesPageView(id) {
         <li class="${o.skipped ? 'skipped' : ''}">
           <span class="grow"><b>${dateText(o.startAt)} · ${new Date(o.startAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</b>
             <span>${o.skipped ? 'Skipped — no game that week' : o === firstOpen && !sr.liveEventId ? `Opens ${until(o.openAt)}` : ''}</span></span>
-          ${o === firstOpen && !sr.liveEventId ? '<button class="btn small primary" data-open-now>Open now</button>' : ''}
           <button class="btn small" data-skip="${o.date}" data-on="${!o.skipped}">${o.skipped ? 'Undo' : 'Skip'}</button>
         </li>`).join('')}</ul>` : '<div class="empty">No more dates — edit the days or the end date to add some.</div>'}
       <section class="set-summary" aria-label="Game settings">
