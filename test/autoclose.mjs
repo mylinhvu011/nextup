@@ -49,10 +49,8 @@ const ok = async p => { const r = await p; assert.ok(r.status < 300, JSON.string
     const pst = await ok(call('GET', `/api/events/${ev.id}/me`, null, { 'X-Player-Token': P.token }));
     assert.ok(pst.state.autoClosed, 'players see it closed');
 
-    // reopening gives it a fresh window
-    await ok(call('POST', `/api/manager/events/${ev.id}/reopen`, {}, M));
-    s = await ok(call('GET', `/api/manager/events/${ev.id}`, null, M));
-    assert.ok(s.status === 'active' && !s.autoClosed && s.autoCloseAt > Date.now(), 'reopen restarts the clock');
+    // the freed password works for a brand-new event
+    await ok(call('POST', '/api/manager/events', { name: 'Next week', codeType: 'custom', code: 'tuesday' }, M));
     assert.strictEqual((await ok(call('GET', `/api/manager/events/${ev2.id}`, null, M))).status, 'active', 'extended event still open');
     console.log('autoclose: all checks passed');
   } finally { try { process.kill(-srv.pid); } catch { srv.kill(); } }

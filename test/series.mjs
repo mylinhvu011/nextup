@@ -81,10 +81,6 @@ const ymdUTC = ms => new Date(ms).toISOString().slice(0, 10);
     let msg = await err(call('POST', '/api/join', { code: sr.code, checkOnly: true }), 404);
     assert.match(msg, /No game right now\. Weekly is next on/);
     await err(call('POST', '/api/manager/events', { name: 'Clash2', codeType: 'custom', code: sr.code }, M), 409);
-    // reopening last week's game gets the same code back
-    await ok(call('POST', `/api/manager/events/${sr.liveEventId}/reopen`, {}, M));
-    assert.strictEqual((await ok(call('GET', `/api/manager/events/${sr.liveEventId}`, null, M))).code, sr.code);
-    await ok(call('POST', `/api/manager/events/${sr.liveEventId}/end`, {}, M));
 
     /* ---- skip + open now ---- */
     const next = sr.upcoming[1];

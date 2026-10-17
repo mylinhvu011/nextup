@@ -418,8 +418,10 @@ const err = async (p, status) => { const r = await p; assert.strictEqual(r.statu
     // End event frees code
     await ok(call('POST', `/api/manager/events/${ev.id}/end`, {}, M));
     await err(call('POST', '/api/join', { code: ev.code, checkOnly: true }), 404);
-    // Reopen gets it back; delete removes it
-    await ok(call('POST', `/api/manager/events/${ev.id}/reopen`, {}, M));
+    // no way to reopen an ended event; the code is free for a new one; delete removes the recap
+    await err(call('POST', `/api/manager/events/${ev.id}/reopen`, {}, M), 404);
+    const pinState = await ok(call('GET', `/api/events/${ev.id}/me`, null, a.H));
+    assert.strictEqual(pinState.state.status, 'ended', 'a phone still signed in sees it ended (the app then drops it)');
     await ok(call('DELETE', `/api/manager/events/${ev.id}`, null, M));
     assert.strictEqual((await ok(call('GET', '/api/manager/me', null, M))).events.length, 1);
 

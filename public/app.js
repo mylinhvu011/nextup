@@ -753,6 +753,14 @@ async function playerView(eventId) {
     } else app.innerHTML = `<div class="card"><p class="err">${esc(e.message)}</p><button class="btn" onclick="location.reload()">Try again</button></div>`;
     return;
   }
+  // Ended events can't be opened again: forget this sign-in and go back to the join screen.
+  if (state.status !== 'active') {
+    store.del('nu.player.' + eventId);
+    if (store.get('nu.lastEvent') === eventId) store.del('nu.lastEvent');
+    toast(`${state.name} has ended — there's no live event with that code.`, 'warn', 6000);
+    history.replaceState(null, '', '#/');
+    return homeView();
+  }
   store.set('nu.lastEvent', eventId);
   store.set('nu.player.' + eventId, { ...sess, name: me.name, eventName: state.name, eventCode: state.code });
   live = { state, offset: state.serverNow - Date.now() };
@@ -1843,9 +1851,8 @@ async function managerEventView(eventId) {
           break;
         }
         case 'end-event':
-          if (!(await uiConfirm('End this event? Players can no longer join or sign up. You can reopen it later.', { ok: 'End event', danger: true }))) return;
+          if (!(await uiConfirm('End this event? Players can no longer join or sign up, and the code is freed for a new event. This can\'t be undone.', { ok: 'End event', danger: true }))) return;
           await mapi('POST', `${base}/end`); break;
-        case 'reopen': await mapi('POST', `${base}/reopen`); break;
         case 'delete-event':
           if (!(await uiConfirm('Delete this event for good?', { ok: 'Delete', danger: true }))) return;
           await mapi('DELETE', base); location.hash = '#/manager'; break;
@@ -1939,9 +1946,8 @@ function renderManager(s) {
       </section>
       <details class="more card">
         <summary>More options</summary>
-        <p class="muted small">Ended this by mistake? Reopen it to let people join and sign up again. Deleting removes it from your events for good.</p>
+        <p class="muted small">Its code is free for a new event. Deleting removes this recap from your events for good.</p>
         <div class="row">
-          <button class="btn small" data-act="reopen">Reopen event</button>
           <button class="btn small danger" data-act="delete-event">Delete event</button>
         </div>
       </details>`;

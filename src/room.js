@@ -600,7 +600,7 @@ export class EventRoom extends DurableObject {
     /* ----- organizer routes ----- */
     if (path === '/m' || path.startsWith('/m/')) {
       if (headers.get('x-nu-manager') !== ev.managerId) fail(404, 'Event not found');
-      const live = () => { if (ev.status !== 'active') fail(409, 'This event has ended — reopen it first'); };
+      const live = () => { if (ev.status !== 'active') fail(409, 'This event has ended'); };
 
       if (method === 'GET' && path === '/m') return this.managerState();
 
@@ -653,21 +653,6 @@ export class EventRoom extends DurableObject {
           await this.syncSummary();
         }
         return { ok: true };
-      }
-
-      if (method === 'POST' && path === '/m/reopen') {
-        if (ev.status !== 'active') {
-          let r = await this.registry.reserveCode({ type: 'keep', code: ev.code, eventId: ev.id, seriesId: ev.seriesId });
-          if (r.error) r = await this.registry.reserveCode({ type: 'pin', eventId: ev.id });
-          if (r.error) fail(r.status, r.error);
-          ev.code = r.code; if (r.codeType) ev.codeType = r.codeType;
-          ev.status = 'active'; delete ev.endedAt; delete ev.autoClosed; delete ev.closeOverride; ev.closing = false;
-          ev.openedAt = Date.now();
-          ensureOpenBoard(ev);
-          await this.commit();
-          await this.syncSummary();
-        }
-        return { ok: true, code: ev.code };
       }
 
       if (method === 'POST' && path === '/m/push/off') {
