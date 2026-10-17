@@ -90,7 +90,8 @@ async function handleApi(request, env) {
     if (!mgr) fail(401, 'Please sign in again');
 
     if (method === 'GET' && path === '/api/manager/me') {
-      return json({ username: mgr.username, email: mgr.email, events: await registry.listEvents(mgr.id) });
+      const [events, series] = await Promise.all([registry.listEvents(mgr.id), registry.listSeries(mgr.id)]);
+      return json({ username: mgr.username, email: mgr.email, events, series });
     }
     if (method === 'GET' && path === '/api/manager/account') {
       return json({ username: mgr.username, email: mgr.email });
@@ -111,6 +112,20 @@ async function handleApi(request, env) {
       if (!res.ok) { await registry.releaseCode(code.code, eventId); return res; }
       await registry.putSummary(await res.json());
       return json({ id: eventId, code: code.code });
+    }
+    /* repeating events */
+    if (method === 'POST' && path === '/api/manager/series') {
+      const b = await readJson(request);
+      return json(rpc(await registry.createSeries({ managerId: mgr.id, name: b.name, codeType: b.codeType, code: b.code, settings: b.settings, schedule: b.schedule })));
+    }
+    if ((m = path.match(/^\/api\/manager\/series\/([\w-]{6,40})(\/[a-z]+)?$/))) {
+      const id = m[1], sub = m[2] || '';
+      const b = method === 'GET' || method === 'DELETE' ? {} : await readJson(request);
+      if (method === 'GET' && !sub) return json(rpc(await registry.getSeries(mgr.id, id)));
+      if (method === 'PATCH' && !sub) return json(rpc(await registry.updateSeries({ managerId: mgr.id, id, name: b.name, settings: b.settings, schedule: b.schedule })));
+      if (method === 'DELETE' && !sub) return json(rpc(await registry.deleteSeries({ managerId: mgr.id, id })));
+      if (method === 'POST' && sub === '/skip') return json(rpc(await registry.skipSeries({ managerId: mgr.id, id, date: b.date, skip: !!b.skip })));
+      if (method === 'POST' && sub === '/open') return json(rpc(await registry.openSeriesNow({ managerId: mgr.id, id })));
     }
     if ((m = path.match(/^\/api\/manager\/events\/([\w-]{6,40})(\/.*)?$/))) {
       return forward(env, request, m[1], '/m' + (m[2] || ''), { managerId: mgr.id });

@@ -26,10 +26,10 @@
 
   "vars": {
     // Contact for push services — change to your email
-    "VAPID_SUBJECT": "mailto:mylinhvu11@gmail.com",
+    "VAPID_SUBJECT": "mailto:organizer@example.com",
     // Sender address for password-reset and username emails (see README: "Email for account recovery").
     // Leave empty until you've set up Brevo or Resend.
-    "MAIL_FROM": "mylinhvu11@gmail.com"
+    "MAIL_FROM": ""
   },
 
   "observability": { "enabled": true }

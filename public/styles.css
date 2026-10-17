@@ -547,3 +547,50 @@ dialog .set-editor { gap: 12px; }
 .forgot-links .linkbtn { font-size: 14px; padding: 8px 0; }
 .note-warn { font-size: 13px; color: var(--ink-2); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line)); border-radius: 10px; padding: 10px 12px; }
 #topnav a.who { color: var(--accent-on-dark, var(--lime)); }
+
+/* Auto-close note on the organizer's event screen */
+.autoclose { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
+.autoclose b { color: var(--ink); }
+.autoclose .soon { color: #b45309; font-weight: 600; }
+.autoclose .linkbtn { font-size: 14px; padding: 6px 0; }
+
+/* Event length setting */
+.time-input { width: auto; min-width: 120px; height: 44px; padding: 0 10px; }
+.seg button svg.ic-repeat, .btn svg.ic-repeat { vertical-align: -2px; margin-right: 4px; }
+
+/* Repeating events: New event panel */
+.rep-panel { background: var(--surface); border: 1.5px solid var(--grass); border-radius: 16px; padding: 4px 16px 16px; }
+.rep-grid { display: flex; flex-direction: column; gap: 14px; }
+.rep-grid .set-row-wrap { border-bottom: 1px solid var(--line); }
+.rep-grid .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.rep-grid .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.rep-grid label, .rep-grid .lbl { font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.rep-grid input, .rep-grid select { width: 100%; box-sizing: border-box; min-height: 46px; min-width: 0; }
+.daychips { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.daychips button { height: 44px; border: 1.5px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-weight: 600; font-size: 14px; cursor: pointer; padding: 0; }
+.daychips button[aria-pressed=true] { background: var(--grass); border-color: var(--grass); color: var(--on-primary); font-weight: 700; }
+.rep-preview { background: var(--surface-2); border-radius: 12px; padding: 12px; font-size: 14px; line-height: 1.45; color: var(--ink); }
+
+/* Repeating events: home + page */
+.rep-pill { display: inline-flex; align-items: center; gap: 5px; background: color-mix(in srgb, var(--grass) 14%, var(--surface)); color: var(--ink); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 4px 9px; border-radius: 999px; }
+.rep-pill svg { color: var(--grass); }
+.rep-mark { color: var(--grass); display: inline-flex; vertical-align: -1px; }
+.live-stats.two-stats { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); }
+.series-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.series-actions > * { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 50px; background: var(--surface); border: 0; color: var(--grass); font: inherit; font-weight: 700; font-size: 15px; text-decoration: none; cursor: pointer; }
+.series-actions > :first-child { border-right: 1px solid var(--line); }
+.series-head h2 { margin: 0 0 8px; }
+.rep-line { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 12px; font-size: 14px; }
+.rep-line svg { color: var(--grass); flex-shrink: 0; margin-top: 3px; }
+.code-box { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.code-box span { display: block; font-size: 11px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: .05em; }
+.code-box b { display: block; font: 800 30px/1.1 var(--display); letter-spacing: .12em; }
+.code-box b.pw { font-size: 22px; letter-spacing: .02em; }
+.series-live { text-decoration: none; color: inherit; align-items: center; }
+.date-list { list-style: none; margin: 0 0 14px; padding: 0; }
+.date-list li { display: flex; align-items: center; gap: 8px; padding: 10px 12px 10px 16px; min-height: 60px; box-sizing: border-box; }
+.date-list li + li { border-top: 1px solid var(--line); }
+.date-list .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.date-list .grow span { font-size: 13px; color: var(--ink-2); }
+.date-list li.skipped b { text-decoration: line-through; color: var(--ink-3); }
+.date-list li.skipped .grow span { color: #b45309; font-weight: 600; }

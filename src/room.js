@@ -5,17 +5,22 @@
 import { DurableObject } from 'cloudflare:workers';
 import { newId, fail, json, errorResponse, readJson, cleanName } from './util.js';
 import { sendPush } from './webpush.js';
+import { closeAtFor, parseHM, tzOk } from './schedule.js';
 
 const PUSH_BATCH = 40; // stay under the free plan's 50 outgoing requests per run
+
+// Events end on their own: by default 12 hours after they open, or at the length / end time set in
+// settings. "Keep open 1 more hour" pushes it out (closeOverride).
 
 const DEFAULT_SETTINGS = {
   playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1,
   warnMinutes: 2, allowTeamPick: true, allowLeave: true, defaultPinnies: 'a', fieldNames: [],
+  closeMode: 'hours', closeHours: 12, closeTime: '22:00', tz: 'UTC',
   theme: { preset: 'pitch', main: '#1f8a5b', accent: '#c6f24e', pinnie: '#ff7a1a' }
 };
 const hexColor = v => (/^#[0-9a-fA-F]{6}$/.test(String(v || '')) ? String(v).toLowerCase() : undefined);
 
-function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
+export function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
   const s = { ...DEFAULT_SETTINGS, ...base };
   const int = (v, min, max) => {
     const n = Math.round(Number(v));
@@ -39,6 +44,10 @@ function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
   if ('warnMinutes' in input) set('warnMinutes', int(input.warnMinutes, 0, 30));
   if ('allowTeamPick' in input) s.allowTeamPick = !!input.allowTeamPick;
   if ('allowLeave' in input) s.allowLeave = !!input.allowLeave;
+  if (input.closeMode === 'hours' || input.closeMode === 'time') s.closeMode = input.closeMode;
+  if ('closeHours' in input) set('closeHours', int(input.closeHours, 1, 24));
+  if ('closeTime' in input && parseHM(input.closeTime)) s.closeTime = String(input.closeTime).padStart(5, '0');
+  if ('tz' in input && tzOk(input.tz)) s.tz = input.tz;
   if (input.defaultPinnies === 'a' || input.defaultPinnies === 'b') s.defaultPinnies = input.defaultPinnies;
   if (input.theme && typeof input.theme === 'object') {
     const t = {
@@ -126,6 +135,8 @@ export class EventRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.ev = null;
+    // AUTO_CLOSE_SECONDS is only for tests: replaces the "close after N hours" length.
+    this.testCloseMs = Number(env.AUTO_CLOSE_SECONDS) > 0 ? Number(env.AUTO_CLOSE_SECONDS) * 1000 : 0;
     ctx.blockConcurrencyWhile(async () => { this.ev = (await ctx.storage.get('ev')) || null; });
     // Answer keep-alive pings without waking the object.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
@@ -138,7 +149,7 @@ export class EventRoom extends DurableObject {
     const ev = this.ev;
     return {
       id: ev.id, name: ev.name, code: ev.code, codeType: ev.codeType, status: ev.status,
-      closing: !!ev.closing, settings: ev.settings, serverNow: Date.now(),
+      closing: !!ev.closing, autoCloseAt: ev.status === 'active' ? this.closeAt(ev) : null, autoClosed: !!ev.autoClosed, seriesId: ev.seriesId || null, settings: ev.settings, serverNow: Date.now(),
       players: Object.fromEntries(Object.values(ev.players).map(p => [p.id, { id: p.id, name: p.name, guest: !!p.guest, addedBy: (p.guest && p.addedBy) || null }])),
       games: ev.games.map(g => ({
         id: g.id, number: g.number, status: g.status, teams: g.teams, pinnies: g.pinnies,
@@ -160,7 +171,8 @@ export class EventRoom extends DurableObject {
     const ev = this.ev;
     return {
       id: ev.id, managerId: ev.managerId, name: ev.name, code: ev.code, codeType: ev.codeType,
-      status: ev.status, createdAt: ev.createdAt, players: Object.keys(ev.players).length, gamesPlayed: ev.history.length
+      status: ev.status, createdAt: ev.createdAt, players: Object.keys(ev.players).length, gamesPlayed: ev.history.length,
+      seriesId: ev.seriesId || null, occurrence: ev.occurrence || null
     };
   }
   syncSummary() { return this.registry.putSummary(this.summary()); }
@@ -255,6 +267,21 @@ export class EventRoom extends DurableObject {
     });
   }
 
+  /* ---------- ending (by the organizer or automatically) ---------- */
+  closeAt(ev = this.ev) {
+    return ev.closeOverride || closeAtFor(ev.openedAt || ev.createdAt, { ...DEFAULT_SETTINGS, ...ev.settings }, this.testCloseMs);
+  }
+
+  async endEvent(auto = false) {
+    const ev = this.ev;
+    if (ev.status !== 'active') return false;
+    ev.status = 'ended'; ev.endedAt = Date.now();
+    if (auto) ev.autoClosed = true; else delete ev.autoClosed;
+    for (const g of playingGames(ev)) { g.timer.remainingMs = remainingMs(g); g.timer.running = false; g.timer.endsAt = null; }
+    await this.registry.releaseCode(ev.code, ev.id);
+    return true;
+  }
+
   /* ---------- timers via alarms ---------- */
   async scheduleAlarm() {
     const ev = this.ev;
@@ -262,6 +289,7 @@ export class EventRoom extends DurableObject {
     let next = Infinity;
     if (ev.pq && ev.pq.length) next = Date.now();
     if (ev.status === 'active') {
+      next = Math.min(next, this.closeAt(ev));
       const warnMs = ev.settings.warnMinutes * 60000;
       for (const g of playingGames(ev)) {
         const t = g.timer;
@@ -302,6 +330,12 @@ export class EventRoom extends DurableObject {
             this.notifyPlayer(pid, "You're on!", `Game ${g.number} just finished. Head to ${g.field || 'the field'} for Game ${ngo.number}.`, 'game-' + ngo.id);
           }
         }
+      }
+      // Auto-close: events end on their own 12 hours after they open (organizers can extend).
+      if (now >= this.closeAt(ev) - 500 && await this.endEvent(true)) {
+        changed = true;
+        this.notifyManager(`${ev.name} closed automatically`, 'It reached its end time. Reopen it from your events if you still need it.');
+        try { await this.syncSummary(); } catch (e) { console.error(e); }
       }
     }
     try { await this.drainPush(); } catch (e) { console.error(e); }
@@ -353,7 +387,8 @@ export class EventRoom extends DurableObject {
       if (this.ev) fail(409, 'Event exists');
       const ev = {
         id: b.eventId, managerId: b.managerId, name: String(b.name || '').trim().slice(0, 60) || 'Pickup',
-        code: b.code, codeType: b.codeType, status: 'active', createdAt: Date.now(),
+        code: b.code, codeType: b.codeType, status: 'active', createdAt: Date.now(), openedAt: Date.now(),
+        ...(b.seriesId ? { seriesId: String(b.seriesId), occurrence: String(b.occurrence || '') } : {}),
         settings: cleanSettings(b.settings || {}), players: {}, tokens: {}, games: [], history: [],
         managerSubs: [], pq: [], nextGameNumber: 1
       };
@@ -568,7 +603,14 @@ export class EventRoom extends DurableObject {
         let renamed = false;
         if (typeof b.name === 'string' && b.name.trim() && b.name.trim() !== ev.name) { ev.name = b.name.trim().slice(0, 60); renamed = true; }
         if (b.settings) {
-          ev.settings = cleanSettings(b.settings, ev.settings);
+          const before = ev.settings, next = cleanSettings(b.settings, ev.settings);
+          const closeChanged = ['closeMode', 'closeHours', 'closeTime'].some(k => before[k] !== next[k]);
+          if (closeChanged) {
+            const at = closeAtFor(ev.openedAt || ev.createdAt, { ...DEFAULT_SETTINGS, ...next }, this.testCloseMs);
+            if (at <= Date.now() + 60000) fail(400, next.closeMode === 'time' ? 'That end time has already passed — pick a later time' : 'The event has already been open that long — pick a longer length');
+            delete ev.closeOverride;
+          }
+          ev.settings = next;
           for (const g of openGames(ev)) g.timer = freshTimer(ev);
           ensureOpenBoard(ev);
           this.checkUpNext();
@@ -590,6 +632,7 @@ export class EventRoom extends DurableObject {
 
       if (method === 'POST' && path === '/m/code') {
         live();
+        if (ev.seriesId) fail(409, 'This repeating event keeps the same code every time');
         const r = await this.registry.reserveCode({ type: b.type === 'custom' ? 'custom' : 'pin', code: b.code, eventId: ev.id });
         if (r.error) fail(r.status, r.error);
         if (r.code.toLowerCase() !== ev.code.toLowerCase()) await this.registry.releaseCode(ev.code, ev.id);
@@ -600,10 +643,7 @@ export class EventRoom extends DurableObject {
       }
 
       if (method === 'POST' && path === '/m/end') {
-        if (ev.status === 'active') {
-          ev.status = 'ended'; ev.endedAt = Date.now();
-          for (const g of playingGames(ev)) { g.timer.remainingMs = remainingMs(g); g.timer.running = false; g.timer.endsAt = null; }
-          await this.registry.releaseCode(ev.code, ev.id);
+        if (await this.endEvent(false)) {
           await this.commit();
           await this.syncSummary();
         }
@@ -612,11 +652,12 @@ export class EventRoom extends DurableObject {
 
       if (method === 'POST' && path === '/m/reopen') {
         if (ev.status !== 'active') {
-          let r = await this.registry.reserveCode({ type: 'keep', code: ev.code, eventId: ev.id });
+          let r = await this.registry.reserveCode({ type: 'keep', code: ev.code, eventId: ev.id, seriesId: ev.seriesId });
           if (r.error) r = await this.registry.reserveCode({ type: 'pin', eventId: ev.id });
           if (r.error) fail(r.status, r.error);
           ev.code = r.code; if (r.codeType) ev.codeType = r.codeType;
-          ev.status = 'active'; delete ev.endedAt; ev.closing = false;
+          ev.status = 'active'; delete ev.endedAt; delete ev.autoClosed; delete ev.closeOverride; ev.closing = false;
+          ev.openedAt = Date.now();
           ensureOpenBoard(ev);
           await this.commit();
           await this.syncSummary();
@@ -639,6 +680,13 @@ export class EventRoom extends DurableObject {
         this.queuePush([sub], { title: 'Organizer alerts on', body: `You'll hear when a game's time is up at ${ev.name}.`, tag: 'nextup-mgr-' + ev.id, url: `/#/manager/e/${ev.id}` }, 'm');
         await this.commit();
         return { ok: true };
+      }
+
+      if (method === 'POST' && path === '/m/extend') {
+        if (ev.status !== 'active') fail(409, 'This event has ended');
+        ev.closeOverride = this.closeAt(ev) + 3600000;
+        await this.commit();
+        return { ok: true, autoCloseAt: ev.closeOverride };
       }
 
       if (method === 'POST' && path === '/m/lastcall') {

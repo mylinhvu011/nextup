@@ -45,6 +45,17 @@ function resetTheme() {
   THEME_VARS.forEach(v => r.removeProperty(v));
   themeMeta()?.setAttribute('content', '#0d3b2a');
 }
+// "9:42 PM" today, or "Sat 9:42 PM" if it's another day.
+function clockTime(ms) {
+  const d = new Date(ms), now = new Date();
+  const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return d.toDateString() === now.toDateString() ? t : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + t;
+}
+function untilText(ms) {
+  const m = Math.max(1, Math.round(ms / 60000));
+  return m < 60 ? `in ${m} min` : `in ${Math.floor(m / 60)} h ${m % 60 ? (m % 60) + ' min' : ''}`.trim();
+}
+
 function applyTheme(t) {
   if (!t || !t.main || !t.accent || !t.pinnie) t = DEFAULT_THEME;
   const isDefault = t.main === DEFAULT_THEME.main && t.accent === DEFAULT_THEME.accent && t.pinnie === DEFAULT_THEME.pinnie;
@@ -841,7 +852,7 @@ function renderPlayer(s, me) {
   const st = s.settings;
   applyTheme(st.theme);
   if (s.status !== 'active') {
-    app.innerHTML = `<div class="card"><h2>${esc(s.name)}</h2><p class="muted">This event has ended. Thanks for playing!</p><a class="btn" href="#/" data-act="signout">Back home</a></div>`;
+    app.innerHTML = `<div class="card"><h2>${esc(s.name)}</h2><p class="muted">${s.autoClosed ? 'This event closed for the day.' : 'This event has ended.'} Thanks for playing!</p><a class="btn" href="#/" data-act="signout">Back home</a></div>`;
     return;
   }
   const playing = s.games.filter(g => g.status === 'playing');
@@ -1114,6 +1125,8 @@ function stepValText(id, v) {
   if (id === 's_min') return `${v} min`;
   if (id === 's_warn') return v === 0 ? 'Off' : `${v} min`;
   if (id === 's_friends') return v === 0 ? 'Off' : String(v);
+  if (id === 's_hours') return `${v} h`;
+  if (id === 's_every') return v === 1 ? 'Every week' : `Every ${v} weeks`;
   return String(v);
 }
 function stepHint(id, v) {
@@ -1151,6 +1164,21 @@ function settingsFields(st) {
       <div class="set-fields" id="fieldNames" data-names="${esc(JSON.stringify(st.fieldNames || []))}">
         <span class="set-hint">Field names — shown to players and picked when a game starts</span>
         <div class="fn-grid">${fieldNameInputs(st.fields || 1, st.fieldNames || [])}</div>
+      </div>
+    </section>
+    <section class="set-group"><h3>Event</h3>
+      <div class="set-row"><span class="set-title">Event ends</span>
+        <div class="seg" id="s_closeMode" role="group" aria-label="Event ends">
+          <button type="button" data-v="hours" aria-pressed="${st.closeMode !== 'time'}">After</button>
+          <button type="button" data-v="time" aria-pressed="${st.closeMode === 'time'}">At a time</button>
+        </div>
+      </div>
+      <div id="closeHoursRow" class="${st.closeMode === 'time' ? 'hidden' : ''}">
+        ${stepperRow('s_hours', 'Open for', 'Then it closes on its own and frees the code', st.closeHours || 12, { min: 1, max: 24, less: 'Shorter event', more: 'Longer event' })}
+      </div>
+      <div id="closeTimeRow" class="set-row ${st.closeMode === 'time' ? '' : 'hidden'}">
+        <div class="set-text"><label class="set-title" for="s_closeTime">Ends at</label><span class="set-hint">Closes on its own and frees the code</span></div>
+        <input type="time" id="s_closeTime" class="time-input" value="${esc(st.closeTime || '22:00')}">
       </div>
     </section>
     <section class="set-group"><h3>The line</h3>
@@ -1218,6 +1246,21 @@ function wireSettings(root) {
     $$('button', pin).forEach(x => x.setAttribute('aria-pressed', x === b));
     changed();
   });
+  const cm = $('#s_closeMode', root);
+  if (cm) $$('button', cm).forEach(b => b.onclick = () => {
+    $$('button', cm).forEach(x => x.setAttribute('aria-pressed', x === b));
+    $('#closeHoursRow', root).classList.toggle('hidden', b.dataset.v === 'time');
+    $('#closeTimeRow', root).classList.toggle('hidden', b.dataset.v !== 'time');
+    changed();
+  });
+  const ct = $('#s_closeTime', root);
+  if (ct) ct.addEventListener('change', changed);
+}
+const myTz = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
+// "19:30" -> "7:30 PM"
+function hmText(hm) {
+  const [h, m] = String(hm || '0:0').split(':').map(Number);
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 // Every field name typed so far (kept even when the field count goes down, so going back up restores them).
 function readFieldNames(root) {
@@ -1242,6 +1285,10 @@ function readSettings(root) {
     maxSignups: unl('s_signups') ? null : val('s_signups'),
     maxFriends: unl('s_friends') ? null : val('s_friends'),
     warnMinutes: val('s_warn'),
+    closeMode: $('#s_closeMode [aria-pressed=true]', root)?.dataset.v || 'hours',
+    closeHours: val('s_hours'),
+    closeTime: $('#s_closeTime', root)?.value || '22:00',
+    tz: myTz(),
     defaultPinnies: $('#s_pin [aria-pressed=true]', root)?.dataset.v || 'a',
     allowTeamPick: on('s_pick'),
     allowLeave: on('s_leave'),
@@ -1257,6 +1304,7 @@ function settingsChips(st) {
   const chips = [
     `${st.playersPerTeam}v${st.playersPerTeam}`,
     `${st.gameMinutes} min games`,
+    st.closeMode === 'time' ? `Ends ${hmText(st.closeTime)}` : `Ends after ${st.closeHours || 12} h`,
     st.maxBoards === null ? 'Unlimited line' : `${plural(st.maxBoards, 'board')} in the line`,
     st.maxSignups === null ? 'Unlimited sign-ups' : `${plural(st.maxSignups, 'sign-up')} each`,
     friends === null ? 'Friends: no limit' : friends === 0 ? 'Friends: off' : `Friends: up to ${friends}`,
@@ -1271,7 +1319,7 @@ function settingsChips(st) {
   return chips.map(c => `<span class="chip">${esc(c)}</span>`).join('') +
     `<span class="chip">${chipsHtml(t)}${esc(tname)}</span>`;
 }
-const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1, fieldNames: [], warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: true, allowLeave: true };
+const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1, fieldNames: [], warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: true, allowLeave: true, closeMode: 'hours', closeHours: 12, closeTime: '22:00' };
 // Field names for an event's settings, padded with "Field N".
 const fieldNamesOf = st => Array.from({ length: Math.max(1, st.fields || 1) }, (_, i) =>
   (((st.fieldNames || [])[i]) || '').trim() || `Field ${i + 1}`);
@@ -1279,6 +1327,7 @@ const fieldChoice = {}; // organizer's pick of field for a waiting game, kept ac
 
 /* ---------------- organizer home: live → new event → ended ---------------- */
 const chev = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"></path></svg>';
+const repeatIcon = '<svg class="ic-repeat" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6.5A5.5 5.5 0 0 1 12.6 4M13.5 9.5A5.5 5.5 0 0 1 3.4 12"></path><path d="M12.8 1.5V4.3H10M3.2 14.5v-2.8H6"></path></svg>';
 const plusIcon = '<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M10 4v12M4 10h12"></path></svg>';
 function startedText(ts) {
   const d = new Date(ts), now = new Date();
@@ -1295,7 +1344,8 @@ async function managerHomeView() {
   $('#logout').onclick = async () => { await mapi('POST', '/api/manager/logout').catch(() => {}); store.del('nu.manager'); route(); };
   const emailNote = me.email ? '' : `<div class="alertbar"><span><b>Add an email</b> so you can reset your password if you ever forget it.</span><a class="btn lime small" href="#/manager/account">Add email</a></div>`;
 
-  if (!me.events.length) {
+  const series = me.series || [];
+  if (!me.events.length && !series.length) {
     app.innerHTML = `${emailNote}<section class="empty-home">
       <svg width="150" height="110" viewBox="0 0 150 110" fill="none" role="img" aria-label="Three empty sign-up boards">
         <rect x="6" y="18" width="42" height="56" rx="6" stroke="currentColor" stroke-width="2.5"></rect>
@@ -1321,7 +1371,7 @@ async function managerHomeView() {
     <article class="live-card">
       <div class="live-top">
         <div class="row" style="justify-content:space-between">
-          <span class="live-pill"><span></span>Live</span>
+          <span class="row" style="gap:6px"><span class="live-pill"><span></span>Live</span>${e.seriesId ? `<span class="rep-pill">${repeatIcon} Repeats</span>` : ''}</span>
           <span class="muted small">${startedText(e.createdAt)}</span>
         </div>
         <h3>${esc(e.name)}</h3>
@@ -1336,18 +1386,231 @@ async function managerHomeView() {
   const endedRow = e => {
     const d = new Date(e.createdAt).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     return `<a class="ended-row" href="#/manager/e/${e.id}">
-      <span class="grow"><b>${esc(e.name)}</b><span>${d} · ${e.gamesPlayed} game${e.gamesPlayed === 1 ? '' : 's'} · ${e.players} player${e.players === 1 ? '' : 's'}</span></span>${chev}</a>`;
+      <span class="grow"><b>${esc(e.name)}${e.seriesId ? ` <span class="rep-mark" title="Repeating event">${repeatIcon}</span>` : ''}</b><span>${d} · ${e.gamesPlayed} game${e.gamesPlayed === 1 ? '' : 's'} · ${e.players} player${e.players === 1 ? '' : 's'}</span></span>${chev}</a>`;
   };
+  const seriesCard = sr => `
+    <article class="live-card series-card">
+      <div class="live-top">
+        <div class="row" style="justify-content:space-between">
+          <span class="rep-pill">${repeatIcon} ${esc(scheduleText(sr.schedule))}</span>
+        </div>
+        <h3>${esc(sr.name)}</h3>
+        <div class="live-stats two-stats">
+          <div><span>${sr.codeType === 'custom' ? 'Password' : 'Code'}</span><b class="${sr.codeType === 'custom' ? 'pw' : 'code'}">${esc(sr.code)}</b></div>
+          <div><span>${sr.liveEventId ? 'Now' : 'Opens'}</span><b>${sr.liveEventId ? 'On now' : sr.next ? esc(new Date(sr.next.openAt).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + new Date(sr.next.openAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })) : 'No dates'}</b></div>
+        </div>
+      </div>
+      <div class="series-actions">
+        ${sr.liveEventId ? `<a href="#/manager/e/${sr.liveEventId}">Go to event</a>` : sr.next ? `<button type="button" data-open-series="${sr.id}">Open it now</button>` : '<span></span>'}
+        <a href="#/manager/s/${sr.id}">Manage ${chev}</a>
+      </div>
+    </article>`;
   app.innerHTML = `
     ${emailNote}
     ${liveEvents.length ? `<h2 class="section-title" style="margin-top:4px">Live now</h2>
       <div class="ev-list">${liveEvents.map(liveCard).join('')}</div>` : ''}
-    <a class="new-cta" href="#/manager/new" style="${liveEvents.length ? '' : 'margin-top:4px'}">
+    ${series.length ? `<h2 class="section-title" style="${liveEvents.length ? '' : 'margin-top:4px'}">Repeating</h2>
+      <div class="ev-list">${series.map(seriesCard).join('')}</div>` : ''}
+    <a class="new-cta" href="#/manager/new" style="${liveEvents.length || series.length ? '' : 'margin-top:4px'}">
       <span class="new-cta-icon">${plusIcon}</span>
-      <span class="grow"><b>New event</b><span>${hasSaved ? 'Same settings as last time' : 'Pick a name and go'}</span></span>${chev}
+      <span class="grow"><b>New event</b><span>${hasSaved ? 'Same settings as last time' : 'Right now, or on repeat'}</span></span>${chev}
     </a>
     ${endedEvents.length ? `<div class="section-title"><span>Ended</span><span class="muted small" style="text-transform:none;font-family:var(--font)">${endedEvents.length} event${endedEvents.length === 1 ? '' : 's'}</span></div>
       <nav class="ended-list" aria-label="Ended events">${endedEvents.map(endedRow).join('')}</nav>` : ''}`;
+  $$('[data-open-series]').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await mapi('POST', `/api/manager/series/${b.dataset.openSeries}/open`); location.hash = '#/manager/e/' + r.eventId; }
+    catch (ex) { toast(ex.message, 'warn'); b.disabled = false; }
+  });
+}
+
+/* ---------------- repeating event page ---------------- */
+async function seriesPageView(id) {
+  topnav.innerHTML = `<a href="#/manager">← Your events</a>`;
+  app.innerHTML = '<div class="spinner"></div>';
+  let sr, me;
+  try { [sr, me] = await Promise.all([mapi('GET', `/api/manager/series/${id}`), mapi('GET', '/api/manager/me')]); }
+  catch (e) {
+    if (e.status === 401) { store.del('nu.manager'); return managerAuthView(); }
+    app.innerHTML = `<section class="card"><p>${esc(e.message)}</p><a class="btn" href="#/manager">← Your events</a></section>`; return;
+  }
+  const base = `/api/manager/series/${id}`;
+  const past = me.events.filter(e => e.seriesId === id && e.status !== 'active').sort((a, b) => b.createdAt - a.createdAt);
+  const render = () => {
+    const firstOpen = sr.upcoming.find(o => !o.skipped);
+    const until = ms => { const m = Math.round((ms - Date.now()) / 60000); return m <= 0 ? 'now' : m < 60 ? `in ${m} min` : m < 1440 ? `in ${Math.round(m / 60)} h` : `in ${Math.round(m / 1440)} day${Math.round(m / 1440) === 1 ? '' : 's'}`; };
+    app.innerHTML = `
+      <div class="page-head">
+        <a class="back" href="#/manager" aria-label="Back to your events"><svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.5L7.5 11l6.5 6.5"></path></svg></a>
+        <h1>Repeating event</h1>
+      </div>
+      <section class="card series-head">
+        <h2>${esc(sr.name)}</h2>
+        <p class="rep-line">${repeatIcon}<span>${esc(scheduleText(sr.schedule))}${sr.schedule.opensBefore ? ` · sign-ups ${sr.schedule.opensBefore >= 60 ? sr.schedule.opensBefore / 60 + ' h' : sr.schedule.opensBefore + ' min'} before` : ''}${sr.schedule.endDate ? ` · until ${dateText(Date.parse(sr.schedule.endDate + 'T12:00'))}` : ''}</span></p>
+        <div class="code-box">
+          <div><span>${sr.codeType === 'custom' ? 'Password' : 'Code'} — same every time</span><b class="${sr.codeType === 'custom' ? 'pw' : 'code'}">${esc(sr.code)}</b></div>
+          <button class="btn small" id="srShare">Share</button>
+        </div>
+        <p class="field-hint">The code only works while a date is open. The rest of the time, players are told when it's next on.</p>
+        <div class="row">
+          <button class="btn small" id="srEdit">Edit name, days &amp; time</button>
+          <button class="btn small" id="srSettings">⚙ Game settings</button>
+        </div>
+      </section>
+      ${sr.liveEventId ? `<a class="lastcall series-live" href="#/manager/e/${sr.liveEventId}"><div><b><span class="live-pill"><span></span>Live</span> On now</b><span>Go to the event to run the games.</span></div>${chev}</a>` : ''}
+      <h3 class="section-title">Next dates</h3>
+      ${sr.upcoming.length ? `<ul class="ended-list date-list" aria-label="Next dates">${sr.upcoming.map(o => `
+        <li class="${o.skipped ? 'skipped' : ''}">
+          <span class="grow"><b>${dateText(o.startAt)} · ${new Date(o.startAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</b>
+            <span>${o.skipped ? 'Skipped — no game that week' : o === firstOpen && !sr.liveEventId ? `Opens ${until(o.openAt)}` : ''}</span></span>
+          ${o === firstOpen && !sr.liveEventId ? '<button class="btn small primary" data-open-now>Open now</button>' : ''}
+          <button class="btn small" data-skip="${o.date}" data-on="${!o.skipped}">${o.skipped ? 'Undo' : 'Skip'}</button>
+        </li>`).join('')}</ul>` : '<div class="empty">No more dates — edit the days or the end date to add some.</div>'}
+      <section class="set-summary" aria-label="Game settings">
+        <div class="sum-head"><div><b>Game settings</b><span>Used every time · changes apply from the next date</span></div></div>
+        <div class="sum-chips">${settingsChips({ ...DEFAULTS, ...sr.settings })}</div>
+      </section>
+      ${past.length ? `<h3 class="section-title">Past dates</h3>
+        <nav class="ended-list" aria-label="Past dates">${past.map(e => `<a class="ended-row" href="#/manager/e/${e.id}"><span class="grow"><b>${dateText(e.createdAt)}</b><span>${e.gamesPlayed} game${e.gamesPlayed === 1 ? '' : 's'} · ${e.players} player${e.players === 1 ? '' : 's'}</span></span>${chev}</a>`).join('')}</nav>` : ''}
+      <button class="btn block danger" id="srStop" style="margin-top:18px">Stop repeating</button>
+      <p class="muted small" style="text-align:center">Past dates stay in your events and the code is freed.</p>`;
+
+    $('#srShare').onclick = () => shareJoin(sr.code);
+    $$('[data-skip]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { sr = await mapi('POST', `${base}/skip`, { date: b.dataset.skip, skip: b.dataset.on === 'true' }); render(); }
+      catch (ex) { toast(ex.message, 'warn'); b.disabled = false; }
+    });
+    const on = $('[data-open-now]');
+    if (on) on.onclick = async () => {
+      on.disabled = true;
+      try { const r = await mapi('POST', `${base}/open`); location.hash = '#/manager/e/' + r.eventId; }
+      catch (ex) { toast(ex.message, 'warn'); on.disabled = false; }
+    };
+    $('#srStop').onclick = async () => {
+      if (!(await uiConfirm(`Stop repeating ${sr.name}?
+
+No more dates will open and the code ${sr.code} is freed. Past dates stay in your events${sr.liveEventId ? ', and the one on now keeps going until it ends' : ''}.`, { ok: 'Stop repeating', danger: true }))) return;
+      try { await mapi('DELETE', base); toast('Stopped repeating'); location.hash = '#/manager'; } catch (ex) { toast(ex.message, 'warn'); }
+    };
+    $('#srEdit').onclick = () => {
+      dlg.innerHTML = `<form method="dialog">
+        <div class="dlg-head"><h2>Name, days &amp; time</h2><button class="iconbtn" value="cancel" aria-label="Close">✕</button></div>
+        <div class="dlg-body stack">
+          <div><label for="sr_name">Event name</label><input id="sr_name" maxlength="60" value="${esc(sr.name)}"></div>
+          ${repeatFields(sr.schedule)}
+          <p class="field-hint">Changes apply from the next date. A date that's already open isn't changed.</p>
+        </div>
+        <div class="dlg-foot"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="srSave">Save</button></div>
+      </form>`;
+      wireSettings(dlg); wireRepeat(dlg);
+      $('#srSave', dlg).onclick = async ev => {
+        ev.preventDefault();
+        try { sr = await mapi('PATCH', base, { name: $('#sr_name', dlg).value, schedule: readSchedule(dlg) }); dlg.close(); toast('Saved'); render(); }
+        catch (ex) { toast(ex.message, 'warn'); }
+      };
+      dlg.showModal();
+    };
+    $('#srSettings').onclick = () => {
+      dlg.innerHTML = `<form method="dialog">
+        <div class="dlg-head"><h2>Game settings</h2><button class="iconbtn" value="cancel" aria-label="Close">✕</button></div>
+        <div class="dlg-body stack"><div class="set-editor">${settingsFields({ ...DEFAULTS, ...sr.settings })}</div>
+          <p class="field-hint">Used from the next date. ${sr.liveEventId ? "To change today's, use Settings on the event." : ''}</p></div>
+        <div class="dlg-foot"><button class="btn" value="cancel">Cancel</button><button class="btn primary" id="srSaveSet">Save</button></div>
+      </form>`;
+      wireSettings(dlg);
+      $('#srSaveSet', dlg).onclick = async ev => {
+        ev.preventDefault();
+        try { sr = await mapi('PATCH', base, { settings: readSettings(dlg) }); dlg.close(); toast('Saved for the next date'); render(); }
+        catch (ex) { toast(ex.message, 'warn'); }
+      };
+      dlg.onclose = () => resetTheme();
+      dlg.showModal();
+    };
+  };
+  render();
+}
+
+/* ---------------- repeating events ---------------- */
+const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MON_FIRST = [1, 2, 3, 4, 5, 6, 0];
+const todayYmd = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const joinAnd = a => a.length <= 1 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' & ' + a[a.length - 1];
+// "Every 2 weeks on Tue & Thu · 7:00 PM"
+function scheduleText(sc, { time = true } = {}) {
+  const days = joinAnd(MON_FIRST.filter(d => sc.days.includes(d)).map(d => DAY_SHORT[d]));
+  return (sc.everyWeeks > 1 ? `Every ${sc.everyWeeks} weeks on ${days}` : `Every ${days}`) + (time ? ` · ${hmText(sc.startTime)}` : '');
+}
+const dateText = ms => new Date(ms).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+// Next game start times for a schedule, in this browser's time zone (preview only; the server decides).
+function localOccurrences(sc, count = 3) {
+  const out = [];
+  if (!sc.days.length || !sc.startTime || !sc.startDate) return out;
+  const dn = s => { const [y, m, d] = s.split('-').map(Number); return Math.floor(Date.UTC(y, m - 1, d) / 864e5); };
+  const first = dn(sc.startDate), fw = Math.floor((first + 3) / 7);
+  const last = sc.endDate ? dn(sc.endDate) : Infinity;
+  const [h, mi] = sc.startTime.split(':').map(Number);
+  for (let n = Math.max(first, dn(todayYmd())), i = 0; i < 800 && out.length < count && n <= last; i++, n++) {
+    if (!sc.days.includes(((n + 4) % 7 + 7) % 7)) continue;
+    if ((Math.floor((n + 3) / 7) - fw) % sc.everyWeeks) continue;
+    const d = new Date(n * 864e5);
+    const start = new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), h, mi).getTime();
+    if (start + 3 * 3600000 < Date.now()) continue;
+    out.push(start);
+  }
+  return out;
+}
+function repeatFields(sc) {
+  const opens = [[0, 'At start time'], [15, '15 min before'], [30, '30 min before'], [60, '1 hour before'], [120, '2 hours before']];
+  return `
+    <div class="rep-grid">
+      ${stepperRow('s_every', 'How often', null, sc.everyWeeks || 1, { min: 1, max: 8, less: 'More often', more: 'Less often' })}
+      <div class="field"><span class="lbl" id="daysLbl">On</span>
+        <div class="daychips" id="repDays" role="group" aria-labelledby="daysLbl">
+          ${MON_FIRST.map(d => `<button type="button" data-d="${d}" aria-pressed="${sc.days.includes(d)}" aria-label="${DAY_LONG[d]}">${DAY_SHORT[d][0]}</button>`).join('')}
+        </div>
+      </div>
+      <div class="two">
+        <div class="field"><label for="repStart">Games start</label><input type="time" id="repStart" value="${esc(sc.startTime || '19:00')}"></div>
+        <div class="field"><label for="repOpens">Sign-ups open</label>
+          <select id="repOpens">${opens.map(([v, t]) => `<option value="${v}" ${v === (sc.opensBefore ?? 30) ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
+      </div>
+      <div class="two">
+        <div class="field"><label for="repFrom">Starting</label><input type="date" id="repFrom" value="${esc(sc.startDate || todayYmd())}"></div>
+        <div class="field"><label for="repUntil">Until <span class="muted">(optional)</span></label><input type="date" id="repUntil" value="${esc(sc.endDate || '')}"></div>
+      </div>
+      <div class="rep-preview" id="repPreview" aria-live="polite"></div>
+    </div>`;
+}
+function readSchedule(root) {
+  return {
+    days: $$('#repDays [aria-pressed=true]', root).map(b => +b.dataset.d),
+    everyWeeks: +$('.stepper[data-id="s_every"]', root).dataset.val,
+    startTime: $('#repStart', root).value,
+    opensBefore: +$('#repOpens', root).value,
+    startDate: $('#repFrom', root).value || todayYmd(),
+    endDate: $('#repUntil', root).value || null
+  };
+}
+function repeatPreview(root) {
+  const sc = readSchedule(root);
+  const box = $('#repPreview', root);
+  if (!box) return;
+  if (!sc.days.length) { box.innerHTML = 'Pick at least one day.'; return; }
+  if (!sc.startTime) { box.innerHTML = 'Pick a start time.'; return; }
+  const occ = localOccurrences(sc, 1)[0];
+  const opens = occ ? occ - sc.opensBefore * 60000 : null;
+  box.innerHTML = `<b>${esc(scheduleText(sc))}</b>. ` + (occ
+    ? `First game <b>${dateText(occ)}</b>${sc.opensBefore ? ` — sign-ups open at ${new Date(opens).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}.`
+    : 'No dates in that range.');
+}
+function wireRepeat(root) {
+  $$('#repDays button', root).forEach(b => b.onclick = () => { b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') !== 'true'); repeatPreview(root); });
+  ['#repStart', '#repOpens', '#repFrom', '#repUntil'].forEach(id => $(id, root).addEventListener('change', () => repeatPreview(root)));
+  const st = $('.stepper[data-id="s_every"]', root);
+  $$('[data-step]', st).forEach(b => b.addEventListener('click', () => setTimeout(() => repeatPreview(root))));
+  repeatPreview(root);
 }
 
 /* ---------------- new event page ---------------- */
@@ -1365,6 +1628,16 @@ async function newEventView() {
         <label for="evname">Event name</label>
         <input id="evname" maxlength="60" placeholder="Thursday night pickup">
       </div>
+      <div class="field">
+        <span class="lbl" id="whenLbl">When</span>
+        <div class="seg seg-full" id="whenSeg" role="group" aria-labelledby="whenLbl">
+          <button type="button" data-w="now" aria-pressed="true">Right now</button>
+          <button type="button" data-w="repeat" aria-pressed="false">${repeatIcon} Repeats</button>
+        </div>
+      </div>
+      <section class="rep-panel hidden" id="repPanel" aria-label="Repeat">
+        ${repeatFields({ days: [new Date().getDay()], everyWeeks: 1, startTime: '19:00', opensBefore: 30, startDate: todayYmd(), endDate: null })}
+      </section>
       <div class="field">
         <span class="lbl" id="joinLbl">How players join</span>
         <div class="seg seg-full" id="codeSeg" role="group" aria-labelledby="joinLbl">
@@ -1398,6 +1671,19 @@ async function newEventView() {
 
   const form = $('#newEv');
   wireSettings(form);
+  wireRepeat(form);
+  let repeating = false;
+  const codeHint = () => repeating
+    ? 'The same code every time, so regulars only learn it once. It only works while a date is open.'
+    : ($('[data-ct="custom"]', form).getAttribute('aria-pressed') === 'true' ? 'Players type this password to join (4–32 characters).' : 'A random code is made for you — share it or show the QR.');
+  $$('[data-w]', form).forEach(b => b.onclick = () => {
+    repeating = b.dataset.w === 'repeat';
+    $$('[data-w]', form).forEach(x => x.setAttribute('aria-pressed', x === b));
+    $('#repPanel').classList.toggle('hidden', !repeating);
+    $('#startBtn').textContent = repeating ? 'Create repeating event' : 'Start event';
+    $('#startHint').textContent = repeating ? 'Each date opens on its own when sign-ups open.' : "You'll get a join code and QR code to share.";
+    $('#codeHint').textContent = codeHint();
+  });
   let edited = false;
   form.addEventListener('settingschange', () => {
     edited = true;
@@ -1408,14 +1694,14 @@ async function newEventView() {
     $$('[data-ct]', seg).forEach(x => x.setAttribute('aria-pressed', x === b));
     const custom = b.dataset.ct === 'custom';
     $('#customCode').classList.toggle('hidden', !custom);
-    $('#codeHint').textContent = custom ? 'Players type this password to join (4–32 characters).' : 'A random code is made for you — share it or show the QR.';
+    $('#codeHint').textContent = codeHint();
     if (custom) $('#customCode').focus();
   });
   const showEditor = open => {
     $('#setEditor').classList.toggle('hidden', !open);
     $('#setSummary').classList.toggle('hidden', open);
     $('#openSet').setAttribute('aria-expanded', open);
-    $('#startHint').textContent = open ? 'These become your settings for next time too.' : "You'll get a join code and QR code to share.";
+    $('#startHint').textContent = open ? 'These become your settings for next time too.' : repeating ? 'Each date opens on its own when sign-ups open.' : "You'll get a join code and QR code to share.";
     if (!open && edited) {
       $('#sumSub').textContent = 'Changed for this event';
       const pill = $('#savedPill'); if (pill) pill.remove();
@@ -1432,8 +1718,21 @@ async function newEventView() {
     const custom = $('[data-ct="custom"]', form).getAttribute('aria-pressed') === 'true';
     if (!name) { err.textContent = 'Give your event a name'; $('#evname').focus(); return; }
     if (custom && $('#customCode').value.trim().length < 4) { err.textContent = 'Custom password must be 4–32 characters'; $('#customCode').focus(); return; }
-    const btn = $('#startBtn'); btn.disabled = true;
     const settings = readSettings(form);
+    if (repeating) {
+      const schedule = readSchedule(form);
+      if (!schedule.days.length) { err.textContent = 'Pick at least one day'; return; }
+      if (!schedule.startTime) { err.textContent = 'Pick a start time'; $('#repStart').focus(); return; }
+      const btn = $('#startBtn'); btn.disabled = true;
+      try {
+        const r = await mapi('POST', '/api/manager/series', { name, codeType: custom ? 'custom' : 'pin', code: $('#customCode').value, settings, schedule });
+        store.set('nu.lastSettings', settings);
+        if (r.liveEventId) toast("Today's game is open now");
+        location.hash = '#/manager/s/' + r.id;
+      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+      return;
+    }
+    const btn = $('#startBtn'); btn.disabled = true;
     try {
       const r = await mapi('POST', '/api/manager/events', { name, codeType: custom ? 'custom' : 'pin', code: $('#customCode').value, settings });
       store.set('nu.lastSettings', settings);
@@ -1514,6 +1813,10 @@ async function managerEventView(eventId) {
           if (!(await uiConfirm('Turn on last call?\n\nNo new boards will be added. Games already on the board can still be played and people can still grab open spots on them. Everyone gets a "last call" notification.'))) return;
           await mapi('POST', `${base}/lastcall`, { on: true });
           toast('Last call is on'); break;
+        case 'extend': {
+          const r = await mapi('POST', `${base}/extend`);
+          toast('Open until ' + clockTime(r.autoCloseAt)); break;
+        }
         case 'lastcall-off':
           await mapi('POST', `${base}/lastcall`, { on: false });
           toast('The line is open again'); break;
@@ -1623,12 +1926,13 @@ function renderManager(s) {
     app.innerHTML = `<section class="card ended-card">
         <div class="pill ended">Ended</div>
         <h2 style="margin-top:10px">${esc(s.name)}</h2>
-        <p class="muted" style="margin:0 0 4px">This event is over and saved in your events.</p>
+        <p class="muted" style="margin:0 0 4px">${s.autoClosed ? 'This event closed on its own at its end time and is saved in your events.' : 'This event is over and saved in your events.'}</p>
         <div class="ended-stats">
           <div><b>${s.history.length}</b><span>game${s.history.length === 1 ? '' : 's'} played</span></div>
           <div><b>${players}</b><span>player${players === 1 ? '' : 's'}</span></div>
         </div>
         <div class="stack">
+          ${s.seriesId ? `<a class="btn block" href="#/manager/s/${s.seriesId}">${repeatIcon} See the next dates</a>` : ''}
           <a class="btn primary block" href="#/manager">← Back to all events</a>
           <a class="btn block" href="#/manager/new">+ Start a new event</a>
         </div>
@@ -1706,12 +2010,16 @@ function renderManager(s) {
           <div class="muted small">Players go to <b>${esc(location.host)}</b> and enter it, or scan the QR.</div>
           <div class="row" style="margin-top:10px">
             <button class="btn small" data-act="share">Share link</button>
-            <button class="btn small" data-act="newpin">New code</button>
-            <button class="btn small" data-act="custompw">Set password</button>
+            ${s.seriesId ? `<a class="btn small" href="#/manager/s/${s.seriesId}">${repeatIcon} Repeats — same code</a>` : `<button class="btn small" data-act="newpin">New code</button>
+            <button class="btn small" data-act="custompw">Set password</button>`}
           </div>
         </div>
         ${qr ? `<div class="qr" aria-label="QR code to join">${qr}</div>` : ''}
       </div>
+      ${s.autoCloseAt ? `<div class="autoclose">
+        <span>⏱ Closes on its own at <b>${clockTime(s.autoCloseAt)}</b>${s.autoCloseAt - s.serverNow < 7200000 ? ` <span class="soon">(${untilText(s.autoCloseAt - s.serverNow)})</span>` : ''}</span>
+        <button class="linkbtn" data-act="extend">Keep open 1 more hour</button>
+      </div>` : ''}
     </section>
     ${alertBar(s.managerAlerts > 0, 'mgr-alerts', 'mgr-alerts-off', "a game's time is up")}
     ${s.closing ? `<div class="lastcall">
@@ -1792,6 +2100,7 @@ function route() {
   if ((m = h.match(/^\/install\/(.+)$/))) return installView(decodeURIComponent(m[1]));
   if ((m = h.match(/^\/manager\/e\/([\w-]+)$/))) return mgrSession() ? managerEventView(m[1]) : managerAuthView();
   if (h === '/manager') return mgrSession() ? managerHomeView() : managerAuthView();
+  if ((m = h.match(/^\/manager\/s\/([\w-]+)$/))) return mgrSession() ? seriesPageView(m[1]) : managerAuthView();
   if (h === '/manager/new') return mgrSession() ? newEventView() : managerAuthView();
   if (h === '/manager/account') return mgrSession() ? accountView() : managerAuthView();
   if (h === '/manager/forgot') return managerAuthView('forgot-pw');

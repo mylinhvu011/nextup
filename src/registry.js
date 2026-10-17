@@ -5,6 +5,8 @@ import { DurableObject } from 'cloudflare:workers';
 import { newId, normCode } from './util.js';
 import { generateVapidKeys, b64urlEncode, b64urlDecode } from './webpush.js';
 import { sendEmail, emailBody } from './email.js';
+import { cleanSettings } from './room.js';
+import { cleanSchedule, occurrences, closeAtFor, whenText } from './schedule.js';
 
 const SESSION_MS = 30 * 864e5;
 const PBKDF2_ITER = 100000; // Workers' maximum
@@ -224,25 +226,31 @@ export class Registry extends DurableObject {
   async putSummary(summary) { await this.ctx.storage.put(`e:${summary.managerId}:${summary.id}`, summary); return true; }
   async removeSummary(managerId, eventId) { await this.ctx.storage.delete(`e:${managerId}:${eventId}`); return true; }
 
-  /* ---------- join codes ---------- */
+  /* ---------- join codes ----------
+     c:<code>  -> the live event using it right now
+     cs:<code> -> a repeating event that owns it (kept between weeks so nobody else takes it) */
+  async codeTaken(c, { eventId = null, seriesId = null } = {}) {
+    const owner = await this.ctx.storage.get('c:' + c);
+    if (owner && owner !== eventId) return true;
+    const so = await this.ctx.storage.get('cs:' + c);
+    return !!(so && so !== seriesId);
+  }
   // type 'pin' -> random free 4-digit code; type 'custom' -> validate + claim.
-  async reserveCode({ type, code, eventId }) {
+  async reserveCode({ type, code, eventId, seriesId = null }) {
     if (type === 'custom') {
       const c = String(code || '').trim();
       if (c.length < 4 || c.length > 32) return err(400, 'Custom password must be 4–32 characters');
-      const owner = await this.ctx.storage.get('c:' + normCode(c));
-      if (owner && owner !== eventId) return err(409, 'Another live event is using that password — pick a different one');
+      if (await this.codeTaken(normCode(c), { eventId, seriesId })) return err(409, 'Another event is using that password — pick a different one');
       await this.ctx.storage.put('c:' + normCode(c), eventId);
       return { code: c, codeType: 'custom' };
     }
     if (type === 'keep' && code) {
-      const owner = await this.ctx.storage.get('c:' + normCode(code));
-      if (!owner || owner === eventId) { await this.ctx.storage.put('c:' + normCode(code), eventId); return { code }; }
+      if (!(await this.codeTaken(normCode(code), { eventId, seriesId }))) { await this.ctx.storage.put('c:' + normCode(code), eventId); return { code }; }
       return err(409, 'taken');
     }
     for (let i = 0; i < 300; i++) {
       const c = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
-      if (!(await this.ctx.storage.get('c:' + c))) {
+      if (!(await this.codeTaken(c))) {
         await this.ctx.storage.put('c:' + c, eventId);
         return { code: c, codeType: 'pin' };
       }
@@ -266,6 +274,13 @@ export class Registry extends DurableObject {
     if (!c) return err(400, 'Enter the event code');
     const eventId = await this.ctx.storage.get('c:' + c);
     if (eventId) return { eventId };
+    // A repeating event's code between weeks: say when it's next on (not counted as a wrong code).
+    const sid = await this.ctx.storage.get('cs:' + c);
+    const sr = sid && await this.ctx.storage.get('sr:' + sid);
+    if (sr) {
+      const o = this.nextOcc(sr, Date.now());
+      return err(404, o ? `No game right now. ${sr.name} is next on ${whenText(o.openAt, sr.settings.tz)}.` : `No game right now — ${sr.name} has no more dates scheduled.`);
+    }
     // Move codes carry someone's sign-in from their browser into the Home Screen app.
     const mv = await this.ctx.storage.get('mv:' + c);
     if (mv && mv.exp > Date.now()) return { eventId: mv.eventId, moveCode: c };
@@ -280,7 +295,7 @@ export class Registry extends DurableObject {
     for (let i = 0; i < 50; i++) {
       const bytes = crypto.getRandomValues(new Uint8Array(6));
       const code = [...bytes].map(b => alphabet[b % alphabet.length]).join('');
-      if (await this.ctx.storage.get('c:' + code)) continue;
+      if (await this.ctx.storage.get('c:' + code) || await this.ctx.storage.get('cs:' + code)) continue;
       if (await this.ctx.storage.get('mv:' + code)) continue;
       await this.ctx.storage.put('mv:' + code, { eventId, exp: Date.now() + ttlMs });
       return { code };
@@ -288,4 +303,174 @@ export class Registry extends DurableObject {
     return err(503, 'Could not make a move code — try again');
   }
   async releaseMove(code) { await this.ctx.storage.delete('mv:' + normCode(code)); return true; }
+
+  /* ---------- repeating events ----------
+     sr:<id> -> { id, managerId, name, code, codeType, settings, schedule, skips[], lastDate, currentEventId }
+     The Registry's alarm opens each occurrence as an ordinary event at its sign-up time. */
+  roomStub(eventId) { return this.env.EVENTS.get(this.env.EVENTS.idFromName(eventId)); }
+
+  // The next occurrence still to open: after the last one opened, not skipped, not already over.
+  nextOcc(sr, now, { ignoreSkips = false } = {}) {
+    for (const o of occurrences(sr.schedule, sr.settings.tz, now, 60)) {
+      if (sr.lastDate && o.date <= sr.lastDate) continue;
+      if (!ignoreSkips && sr.skips.includes(o.date)) continue;
+      if (closeAtFor(o.openAt, sr.settings) <= now) continue;
+      return o;
+    }
+    return null;
+  }
+
+  async liveEventOf(sr) {
+    if (!sr.currentEventId) return null;
+    const sum = await this.ctx.storage.get(`e:${sr.managerId}:${sr.currentEventId}`);
+    return sum && sum.status === 'active' ? sr.currentEventId : null;
+  }
+
+  async seriesView(sr) {
+    const now = Date.now();
+    const live = await this.liveEventOf(sr);
+    const upcoming = [];
+    for (const o of occurrences(sr.schedule, sr.settings.tz, now, 12)) {
+      if (sr.lastDate && o.date <= sr.lastDate) continue;
+      if (closeAtFor(o.openAt, sr.settings) <= now) continue;
+      upcoming.push({ ...o, skipped: sr.skips.includes(o.date) });
+      if (upcoming.length >= 6) break;
+    }
+    const next = this.nextOcc(sr, now);
+    const { id, name, code, codeType, settings, schedule, created } = sr;
+    return { id, name, code, codeType, settings, schedule, created, liveEventId: live, next, upcoming };
+  }
+
+  async ownSeries(managerId, id) {
+    const sr = await this.ctx.storage.get('sr:' + id);
+    return sr && sr.managerId === managerId ? sr : null;
+  }
+
+  async listSeries(managerId) {
+    const rows = await this.ctx.storage.list({ prefix: 'sr:' });
+    const mine = [...rows.values()].filter(sr => sr.managerId === managerId).sort((a, b) => a.created - b.created);
+    return Promise.all(mine.map(sr => this.seriesView(sr)));
+  }
+
+  async getSeries(managerId, id) {
+    const sr = await this.ownSeries(managerId, id);
+    return sr ? this.seriesView(sr) : err(404, 'Repeating event not found');
+  }
+
+  async createSeries({ managerId, name, codeType, code, settings, schedule }) {
+    const st = cleanSettings(settings || {});
+    const sc = cleanSchedule(schedule, st.tz);
+    if (sc.error) return err(400, sc.error);
+    const id = newId(9);
+    let c;
+    if (codeType === 'custom') {
+      c = String(code || '').trim();
+      if (c.length < 4 || c.length > 32) return err(400, 'Custom password must be 4–32 characters');
+      if (await this.codeTaken(normCode(c), { seriesId: id })) return err(409, 'Another event is using that password — pick a different one');
+    } else {
+      for (let i = 0; i < 300 && !c; i++) {
+        const t = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+        if (!(await this.codeTaken(t))) c = t;
+      }
+      if (!c) return err(503, 'No free codes right now — use a custom password instead');
+    }
+    await this.ctx.storage.put('cs:' + normCode(c), id);
+    const sr = {
+      id, managerId, name: String(name || '').trim().slice(0, 60) || 'Pickup', code: c, codeType: codeType === 'custom' ? 'custom' : 'pin',
+      settings: st, schedule: sc, skips: [], lastDate: null, currentEventId: null, created: Date.now()
+    };
+    await this.ctx.storage.put('sr:' + id, sr);
+    await this.tickSeries(); // opens it right away if this week's is already due
+    return this.seriesView(await this.ctx.storage.get('sr:' + id));
+  }
+
+  async updateSeries({ managerId, id, name, settings, schedule }) {
+    const sr = await this.ownSeries(managerId, id);
+    if (!sr) return err(404, 'Repeating event not found');
+    if (typeof name === 'string' && name.trim()) sr.name = name.trim().slice(0, 60);
+    if (settings) sr.settings = cleanSettings(settings, sr.settings);
+    if (schedule) {
+      const sc = cleanSchedule({ ...sr.schedule, ...schedule }, sr.settings.tz);
+      if (sc.error) return err(400, sc.error);
+      sr.schedule = sc;
+    }
+    await this.ctx.storage.put('sr:' + id, sr);
+    await this.tickSeries();
+    return this.seriesView(await this.ctx.storage.get('sr:' + id));
+  }
+
+  async skipSeries({ managerId, id, date, skip }) {
+    const sr = await this.ownSeries(managerId, id);
+    if (!sr) return err(404, 'Repeating event not found');
+    sr.skips = sr.skips.filter(d => d !== date && d >= (sr.lastDate || ''));
+    if (skip) sr.skips.push(String(date).slice(0, 10));
+    await this.ctx.storage.put('sr:' + id, sr);
+    await this.tickSeries();
+    return this.seriesView(await this.ctx.storage.get('sr:' + id));
+  }
+
+  // "Open it now": opens the next date early (or returns the one already running).
+  async openSeriesNow({ managerId, id }) {
+    const sr = await this.ownSeries(managerId, id);
+    if (!sr) return err(404, 'Repeating event not found');
+    const live = await this.liveEventOf(sr);
+    if (live) return { eventId: live };
+    const o = this.nextOcc(sr, Date.now());
+    if (!o) return err(409, 'There are no more dates scheduled');
+    const eventId = await this.openOccurrence(sr, o);
+    await this.tickSeries();
+    return { eventId };
+  }
+
+  async deleteSeries({ managerId, id }) {
+    const sr = await this.ownSeries(managerId, id);
+    if (!sr) return err(404, 'Repeating event not found');
+    await this.ctx.storage.delete('sr:' + id);
+    const key = 'cs:' + normCode(sr.code);
+    if ((await this.ctx.storage.get(key)) === id) await this.ctx.storage.delete(key);
+    await this.tickSeries();
+    return { ok: true };
+  }
+
+  async openOccurrence(sr, o) {
+    // Finish last week's if it's somehow still running, so the code moves to the new one.
+    const prev = await this.liveEventOf(sr);
+    if (prev) {
+      await this.roomStub(prev).fetch(new Request('https://room/m/end', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-nu-manager': sr.managerId }, body: '{}'
+      }));
+    }
+    const eventId = newId(9);
+    const key = 'c:' + normCode(sr.code);
+    await this.ctx.storage.put(key, eventId);
+    const res = await this.roomStub(eventId).fetch(new Request('https://room/init', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ eventId, managerId: sr.managerId, name: sr.name, code: sr.code, codeType: sr.codeType, settings: sr.settings, seriesId: sr.id, occurrence: o.date })
+    }));
+    if (!res.ok) { await this.ctx.storage.delete(key); throw new Error('Could not open ' + sr.name + ': ' + (await res.text())); }
+    await this.putSummary(await res.json());
+    sr.lastDate = o.date; sr.currentEventId = eventId;
+    sr.skips = sr.skips.filter(d => d > o.date);
+    await this.ctx.storage.put('sr:' + sr.id, sr);
+    return eventId;
+  }
+
+  // Open whatever is due and set the alarm for the next one.
+  async tickSeries() {
+    const now = Date.now();
+    let next = Infinity;
+    const rows = await this.ctx.storage.list({ prefix: 'sr:' });
+    for (const sr of rows.values()) {
+      let o = this.nextOcc(sr, now);
+      if (o && o.openAt <= now) {
+        try { await this.openOccurrence(sr, o); } catch (e) { console.error(e); next = Math.min(next, now + 60000); continue; }
+        o = this.nextOcc(sr, now);
+      }
+      if (o) next = Math.min(next, o.openAt);
+    }
+    if (next === Infinity) await this.ctx.storage.deleteAlarm();
+    else await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 100));
+  }
+
+  async alarm() { await this.tickSeries(); }
 }

@@ -441,6 +441,13 @@ const err = async (p, status) => { const r = await p; assert.strictEqual(r.statu
       const cfg2 = await (await fetch(BASE + '/api/config')).json();
       assert.strictEqual(cfg2.emailConfigured, true);
 
+      // one account per email (any capitalization), and sign in with email
+      assert.match(await err(call('POST', '/api/manager/register', { username: 'another1', password: 'secret12', email: 'RESET.me@example.com' }), 409), /already on another account/);
+      await err(call('POST', '/api/manager/account', { email: 'coach@example.com' }, { Authorization: 'Bearer ' + acct.token }), 409);
+      await ok(call('POST', '/api/manager/account', { email: 'reset.me@example.com' }, { Authorization: 'Bearer ' + acct.token })); // own email is fine
+      const byEmail = await ok(call('POST', '/api/manager/login', { username: 'Reset.Me@example.com', password: 'oldpass1' }));
+      assert.strictEqual(byEmail.username, 'resetme', 'sign in with email');
+      await err(call('POST', '/api/manager/login', { username: 'reset.me@example.com', password: 'nope1234' }), 401);
       // forgot username
       await ok(call('POST', '/api/manager/forgot-username', { email: 'reset.me@example.com' }));
       await wait(1);

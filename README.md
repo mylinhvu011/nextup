@@ -88,6 +88,7 @@ npm test           # checks the rules, live updates, timers and push encryption
 | Boards in the line | How many waiting games are shown at once (like 3 whiteboards). The line is always filled to this number with empty boards; the game on the field doesn't count. Or **Unlimited** |
 | Sign-ups per person | How many games one person can be on at a time (1, 2, 3…), or **Unlimited** |
 | Games at the same time | Number of fields running at once |
+| Event ends | After a number of hours (default 12) or at a set time; then it closes on its own and frees the code |
 | Heads-up alert | Minutes before the end to tell the next game to get ready (0 = off) |
 | Pinnies go to | Which team gets pinnies on new games (swap per game any time) |
 | Players choose their team | Otherwise names are split evenly automatically |
@@ -96,6 +97,10 @@ npm test           # checks the rules, live updates, timers and push encryption
 | Colors | Pick a scheme (Pitch green, Midnight, Crimson, Royal, Ocean, Sunset) or your own main / highlight / pinnie colors. Every phone on the event updates instantly when you save. |
 
 **Last call:** the organizer can tap 🏁 **Last call** to stop new boards from being added. Games already on the board still play out, people can still take open spots on them, and everyone gets a notification. When the last game ends the organizer is told it's a wrap; **Reopen the line** undoes it.
+
+**Event end:** every event closes on its own so a forgotten event doesn't keep its code or stay live overnight. By default that's **12 hours after it opens**; in Settings → Event you can pick a different length (1–24 hours) or **an end time** (e.g. 10:30 PM, in your time zone). The event screen shows when it will close, with **Keep open 1 more hour** if games run late. When it closes, the code is freed, the organizer gets an alert, and players see that it's closed for the day. **Reopen** from the ended screen starts the clock again.
+
+**Repeating events:** on New event, choose **When → Repeats**: how often (every week, every 2 weeks… up to 8), which days, when games start, when sign-ups open (at start time up to 2 hours before), a first date and an optional last date. Each date opens on its own as a normal event with the same settings and **the same code every time**, then closes at its end time. Between dates the code says *"No game right now. Tuesday Night Pickup is next on Tue, Oct 27 at 6:30 PM."* The code stays reserved for the repeating event, so no other event can take it. From the repeating event's page you can skip a date (and undo), **Open now** early, change the name, days, time or game settings (applies from the next date), see past dates, or **Stop repeating** (frees the code; past dates stay in your events).
 
 Built-in rules: nobody can sign up twice for the same game; names are unique within an event. With a board count of 3, the line always shows 3 waiting boards (empty or filling up); when a game starts it moves to the field and a fresh empty board joins the end of the line. Lowering the count only removes empty boards. With Unlimited, a new board opens whenever every board is full.
 
