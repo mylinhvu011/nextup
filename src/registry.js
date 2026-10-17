@@ -4,6 +4,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { newId, normCode } from './util.js';
 import { generateVapidKeys, b64urlEncode, b64urlDecode } from './webpush.js';
+import { sendEmail, emailBody } from './email.js';
 
 const SESSION_MS = 30 * 864e5;
 const PBKDF2_ITER = 100000; // Workers' maximum
@@ -25,6 +26,12 @@ async function checkPassword(pw, stored) {
 }
 
 const err = (status, error) => ({ error, status });
+const RESET_MS = 60 * 60000; // reset links work for 1 hour
+const normEmail = e => String(e || '').trim().toLowerCase();
+const validEmail = e => e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+async function sha(str) {
+  return b64urlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))));
+}
 
 export class Registry extends DurableObject {
   constructor(ctx, env) {
@@ -53,7 +60,7 @@ export class Registry extends DurableObject {
   async getPublicKey() { return (await this.getVapidKeys()).publicKey; }
 
   /* ---------- organizer accounts ---------- */
-  async register({ username, password, signupCode, ip }) {
+  async register({ username, password, email, signupCode, ip }) {
     if (this.throttle(ip, 'register', 10, 15 * 60000)) return err(429, 'Too many tries — wait a few minutes');
     const code = this.env.MANAGER_SIGNUP_CODE || '';
     if (code && signupCode !== code) return err(403, 'Organizer sign-up code is wrong');
@@ -61,16 +68,30 @@ export class Registry extends DurableObject {
     password = String(password || '');
     if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) return err(400, 'Username: 3–32 letters, numbers, dots, dashes or underscores');
     if (password.length < 6) return err(400, 'Password must be at least 6 characters');
+    email = normEmail(email);
+    if (!validEmail(email)) return err(400, 'Enter a valid email — it lets you reset your password if you forget it');
     const lower = username.toLowerCase();
     if (await this.ctx.storage.get('u:' + lower)) return err(409, 'That username is taken');
-    const m = { id: newId(), username, pass: await hashPassword(password), created: Date.now() };
+    if ((await this.accountsForEmail(email)).length) return err(409, 'That email is already on another account — sign in, or use Forgot username?');
+    const m = { id: newId(), username, email, pass: await hashPassword(password), created: Date.now() };
     await this.ctx.storage.put({ ['u:' + lower]: m });
+    await this.indexEmail(email, lower);
     return this.issueSession(m);
   }
 
   async login({ username, password, ip }) {
     if (this.throttle(ip, 'login', 20, 15 * 60000)) return err(429, 'Too many tries — wait a few minutes');
-    const m = await this.ctx.storage.get('u:' + String(username || '').trim().toLowerCase());
+    const who = String(username || '').trim().toLowerCase();
+    let m = null;
+    if (who.includes('@')) {
+      // Sign in with email; older accounts that shared an email are matched by password
+      for (const a of await this.accountsForEmail(normEmail(who))) {
+        if (await checkPassword(String(password || ''), a.pass)) { m = a; break; }
+      }
+      if (!m) return err(401, 'Wrong email or password');
+      return this.issueSession(m);
+    }
+    m = await this.ctx.storage.get('u:' + who);
     if (!m || !(await checkPassword(String(password || ''), m.pass))) return err(401, 'Wrong username or password');
     return this.issueSession(m);
   }
@@ -88,7 +109,112 @@ export class Registry extends DurableObject {
     const s = await this.ctx.storage.get('s:' + token);
     if (!s) return null;
     if (Date.now() - s.created > SESSION_MS) { await this.ctx.storage.delete('s:' + token); return null; }
-    return { id: s.managerId, username: s.username };
+    const m = await this.ctx.storage.get('u:' + String(s.username).toLowerCase());
+    if (!m || (m.passChangedAt && s.created < m.passChangedAt)) { await this.ctx.storage.delete('s:' + token); return null; }
+    return { id: s.managerId, username: s.username, email: m.email || '' };
+  }
+
+  /* ---------- email + recovery ---------- */
+  async indexEmail(email, lower) {
+    if (!email) return;
+    const list = (await this.ctx.storage.get('em:' + email)) || [];
+    if (!list.includes(lower)) list.push(lower);
+    await this.ctx.storage.put('em:' + email, list);
+  }
+  async unindexEmail(email, lower) {
+    if (!email) return;
+    const list = ((await this.ctx.storage.get('em:' + email)) || []).filter(x => x !== lower);
+    if (list.length) await this.ctx.storage.put('em:' + email, list); else await this.ctx.storage.delete('em:' + email);
+  }
+  async accountsForEmail(email) {
+    const list = (await this.ctx.storage.get('em:' + email)) || [];
+    const out = [];
+    for (const lower of list) { const m = await this.ctx.storage.get('u:' + lower); if (m && m.email === email) out.push(m); }
+    return out;
+  }
+
+  // Change email and/or password for the signed-in organizer.
+  async updateAccount({ username, email, currentPassword, newPassword }) {
+    const lower = String(username || '').toLowerCase();
+    const m = await this.ctx.storage.get('u:' + lower);
+    if (!m) return err(401, 'Please sign in again');
+    const out = { ok: true };
+    if (email !== undefined) {
+      const e = normEmail(email);
+      if (!validEmail(e)) return err(400, 'Enter a valid email');
+      if (e !== m.email && (await this.accountsForEmail(e)).some(a => a.username.toLowerCase() !== lower)) {
+        return err(409, 'That email is already on another account');
+      }
+      if (e !== m.email) { await this.unindexEmail(m.email, lower); m.email = e; await this.indexEmail(e, lower); }
+    }
+    if (newPassword !== undefined) {
+      if (!(await checkPassword(String(currentPassword || ''), m.pass))) return err(401, 'Current password is wrong');
+      if (String(newPassword).length < 6) return err(400, 'New password must be at least 6 characters');
+      m.pass = await hashPassword(String(newPassword));
+      m.passChangedAt = Date.now() - 1; // signs out every other device
+    }
+    await this.ctx.storage.put('u:' + lower, m);
+    if (newPassword !== undefined) Object.assign(out, await this.issueSession(m)); // keep this device signed in
+    out.email = m.email || '';
+    return out;
+  }
+
+  // "Forgot password": email a 1-hour, single-use reset link. Same reply whether or not the account exists.
+  async forgotPassword({ who, ip, origin }) {
+    if (this.throttle(ip, 'forgot', 10, 15 * 60000)) return err(429, 'Too many tries — wait a few minutes');
+    const w = String(who || '').trim().toLowerCase();
+    if (!w) return err(400, 'Enter your username or email');
+    let accounts = [];
+    if (w.includes('@')) accounts = await this.accountsForEmail(normEmail(w));
+    else { const m = await this.ctx.storage.get('u:' + w); if (m && m.email) accounts = [m]; }
+    for (const m of accounts) {
+      const lower = m.username.toLowerCase();
+      if (m.lastResetAt && Date.now() - m.lastResetAt < 60000) continue; // at most one email a minute
+      const token = newId(32);
+      await this.ctx.storage.put('rs:' + (await sha(token)), { user: lower, exp: Date.now() + RESET_MS });
+      m.lastResetAt = Date.now();
+      await this.ctx.storage.put('u:' + lower, m);
+      const { text, html } = emailBody([
+        `Someone asked to reset the password for the Next Up organizer account "${m.username}".`,
+        'Tap the button to choose a new password. The link works once, for 1 hour.',
+        "If you didn't ask for this, you can ignore this email — your password won't change."
+      ], { label: 'Choose a new password', url: `${origin}/#/reset/${token}` });
+      await sendEmail(this.env, { to: m.email, subject: 'Reset your Next Up password', text, html });
+    }
+    return { ok: true };
+  }
+
+  async resetPassword({ token, password }) {
+    const key = 'rs:' + (await sha(String(token || '')));
+    const r = await this.ctx.storage.get(key);
+    if (!r || r.exp < Date.now()) { if (r) await this.ctx.storage.delete(key); return err(400, 'This reset link has expired or was already used — ask for a new one'); }
+    if (String(password || '').length < 6) return err(400, 'Password must be at least 6 characters');
+    const m = await this.ctx.storage.get('u:' + r.user);
+    if (!m) return err(400, 'This reset link is no longer valid');
+    m.pass = await hashPassword(String(password));
+    m.passChangedAt = Date.now() - 1;
+    await this.ctx.storage.put('u:' + r.user, m);
+    await this.ctx.storage.delete(key);
+    return this.issueSession(m);
+  }
+
+  // "Forgot username": email every username tied to that address. Same reply either way.
+  async forgotUsername({ email, ip, origin }) {
+    if (this.throttle(ip, 'forgot', 10, 15 * 60000)) return err(429, 'Too many tries — wait a few minutes');
+    const e = normEmail(email);
+    if (!validEmail(e)) return err(400, 'Enter the email on your account');
+    const accounts = await this.accountsForEmail(e);
+    if (accounts.length) {
+      const names = accounts.map(m => m.username);
+      const { text, html } = emailBody([
+        names.length === 1
+          ? `Your Next Up organizer username is: ${names[0]}`
+          : `This email has ${names.length} Next Up organizer accounts: ${names.join(', ')}`,
+        "If you didn't ask for this, you can ignore this email."
+      ], { label: 'Sign in', url: `${origin}/#/manager` });
+      await sendEmail(this.env, { to: e, subject: 'Your Next Up username', text, html });
+    }
+    return { ok: true };
   }
 
   async listEvents(managerId) {
@@ -131,7 +257,11 @@ export class Registry extends DurableObject {
   }
 
   async lookupCode(code, ip) {
-    if (this.throttle(ip, 'join', 25, 10 * 60000)) return err(429, 'Too many tries — wait a few minutes and try again');
+    // Only WRONG codes count toward the limit (that's what guessing looks like). Many players at one
+    // field share an IP on the same Wi-Fi or carrier, so successful joins are never limited.
+    const k = 'joinmiss:' + (ip || '?');
+    const h = this.hits.get(k);
+    if (h && Date.now() <= h.reset && h.n >= 30) return err(429, 'Too many wrong codes — wait a few minutes and try again');
     const c = normCode(code);
     if (!c) return err(400, 'Enter the event code');
     const eventId = await this.ctx.storage.get('c:' + c);
@@ -140,6 +270,7 @@ export class Registry extends DurableObject {
     const mv = await this.ctx.storage.get('mv:' + c);
     if (mv && mv.exp > Date.now()) return { eventId: mv.eventId, moveCode: c };
     if (mv) await this.ctx.storage.delete('mv:' + c);
+    this.throttle(ip, 'joinmiss', 30, 10 * 60000); // count the miss
     return err(404, 'No live event with that code — check with the organizer');
   }
 

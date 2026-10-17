@@ -10,7 +10,7 @@ const PUSH_BATCH = 40; // stay under the free plan's 50 outgoing requests per ru
 
 const DEFAULT_SETTINGS = {
   playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1,
-  warnMinutes: 2, allowTeamPick: false, allowLeave: true, defaultPinnies: 'a',
+  warnMinutes: 2, allowTeamPick: true, allowLeave: true, defaultPinnies: 'a', fieldNames: [],
   theme: { preset: 'pitch', main: '#1f8a5b', accent: '#c6f24e', pinnie: '#ff7a1a' }
 };
 const hexColor = v => (/^#[0-9a-fA-F]{6}$/.test(String(v || '')) ? String(v).toLowerCase() : undefined);
@@ -33,6 +33,9 @@ function cleanSettings(input = {}, base = DEFAULT_SETTINGS) {
     s.maxFriends = (v === null || v === 'unlimited' || v === '') ? null : (int(v, 0, 50) ?? s.maxFriends);
   }
   if ('fields' in input) set('fields', int(input.fields, 1, 10));
+  if (Array.isArray(input.fieldNames)) {
+    s.fieldNames = input.fieldNames.slice(0, 10).map((n, i) => String(n ?? '').replace(/\s+/g, ' ').trim().slice(0, 24) || `Field ${i + 1}`);
+  }
   if ('warnMinutes' in input) set('warnMinutes', int(input.warnMinutes, 0, 30));
   if ('allowTeamPick' in input) s.allowTeamPick = !!input.allowTeamPick;
   if ('allowLeave' in input) s.allowLeave = !!input.allowLeave;
@@ -58,6 +61,18 @@ const activeSignups = (ev, pid) => ev.games.filter(g => gamePlayers(g).includes(
 const findGame = (ev, gid) => ev.games.find(g => g.id === gid) || fail(404, 'That game is no longer on the board');
 const teamLabel = (g, team) => (g.pinnies === team ? 'the PINNIES team (grab a pinnie)' : 'the no-pinnies team');
 const freshTimer = ev => { const ms = ev.settings.gameMinutes * 60000; return { durationMs: ms, remainingMs: ms, endsAt: null, running: false }; };
+
+// Field names for this event: settings names, padded with "Field N".
+const fieldNamesOf = ev => Array.from({ length: Math.max(1, ev.settings.fields || 1) }, (_, i) =>
+  ((ev.settings.fieldNames || [])[i] || '').trim() || `Field ${i + 1}`);
+// First field not being played on right now (else the first field).
+function freeField(ev) {
+  const names = fieldNamesOf(ev);
+  const busy = new Set(playingGames(ev).map(g => g.field));
+  return names.find(n => !busy.has(n)) || names[0];
+}
+const cleanField = v => String(v || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+const at = g => (g.field ? ` on ${g.field}` : '');
 
 function newGame(ev) {
   return {
@@ -127,7 +142,7 @@ export class EventRoom extends DurableObject {
       players: Object.fromEntries(Object.values(ev.players).map(p => [p.id, { id: p.id, name: p.name, guest: !!p.guest, addedBy: (p.guest && p.addedBy) || null }])),
       games: ev.games.map(g => ({
         id: g.id, number: g.number, status: g.status, teams: g.teams, pinnies: g.pinnies,
-        timer: g.timer, timeUp: !!g.timeUp, startedAt: g.startedAt || null
+        timer: g.timer, timeUp: !!g.timeUp, startedAt: g.startedAt || null, field: g.field || null
       })),
       history: ev.history.slice(-8)
     };
@@ -273,16 +288,18 @@ export class EventRoom extends DurableObject {
         if (!g.warned && warnMs > 0 && t.durationMs > warnMs && rem > 0 && rem <= warnMs + 500) {
           g.warned = true; changed = true;
           const mins = Math.max(1, Math.round(rem / 60000));
-          for (const ng of upNextGames(ev)) for (const pid of gamePlayers(ng)) {
-            this.notifyPlayer(pid, 'Get ready!', `About ${mins} min left in Game ${g.number}. You're on Game ${ng.number} next — warm up.`, 'game-' + ng.id);
+          const ngw = openGames(ev)[0];
+          if (ngw) for (const pid of gamePlayers(ngw)) {
+            this.notifyPlayer(pid, 'Get ready!', `About ${mins} min left in Game ${g.number}${at(g)}. You're on Game ${ngw.number} next — warm up.`, 'game-' + ngw.id);
           }
         }
         if (!g.timeUp && rem <= 500) {
           g.timeUp = true; changed = true;
           t.running = false; t.endsAt = null; t.remainingMs = 0;
           this.notifyManager(`Time's up — Game ${g.number}`, 'End the game to clear the board and bring on the next one.');
-          for (const ng of upNextGames(ev)) for (const pid of gamePlayers(ng)) {
-            this.notifyPlayer(pid, "You're on!", `Game ${g.number} just finished. Head to the field for Game ${ng.number}.`, 'game-' + ng.id);
+          const ngo = openGames(ev)[0];
+          if (ngo) for (const pid of gamePlayers(ngo)) {
+            this.notifyPlayer(pid, "You're on!", `Game ${g.number} just finished. Head to ${g.field || 'the field'} for Game ${ngo.number}.`, 'game-' + ngo.id);
           }
         }
       }
@@ -458,6 +475,19 @@ export class EventRoom extends DurableObject {
         this.checkUpNext();
         await this.commit();
         return { ok: true, team };
+      }
+      if (method === 'POST' && (m = path.match(/^\/p\/games\/([\w-]+)\/switch$/))) {
+        if (!ev.settings.allowTeamPick) fail(403, 'The organizer picks the teams at this event');
+        const g = findGame(ev, m[1]);
+        if (g.status !== 'open') fail(409, 'That game already started');
+        const from = g.teams.a.includes(p.id) ? 'a' : g.teams.b.includes(p.id) ? 'b' : null;
+        if (!from) fail(404, "You're not on that game");
+        const to = from === 'a' ? 'b' : 'a';
+        if (g.teams[to].length >= teamCap(ev)) fail(409, `Team ${to === 'a' ? 1 : 2} is full`);
+        g.teams[from] = g.teams[from].filter(x => x !== p.id);
+        g.teams[to].push(p.id);
+        await this.commit();
+        return { ok: true, team: to };
       }
       if (method === 'POST' && (m = path.match(/^\/p\/games\/([\w-]+)\/leave$/))) {
         if (!ev.settings.allowLeave) fail(403, 'Ask the organizer to take your name off');
@@ -723,13 +753,14 @@ export class EventRoom extends DurableObject {
       case 'start': {
         if (g.status !== 'open') fail(409, 'That game already started');
         const ms = ev.settings.gameMinutes * 60000;
+        g.field = cleanField(b.field) || freeField(ev);
         g.status = 'playing'; g.startedAt = Date.now();
         g.timer = { durationMs: ms, remainingMs: ms, endsAt: Date.now() + ms, running: true };
         g.warned = false; g.timeUp = false;
         ev.games = [...playingGames(ev), ...openGames(ev)];
         ensureOpenBoard(ev); // the game left the line, so a fresh board takes its place
         for (const team of ['a', 'b']) for (const pid of g.teams[team]) {
-          this.notifyPlayer(pid, `Game ${g.number} is on!`, `You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id);
+          this.notifyPlayer(pid, `Game ${g.number} is on — ${g.field}!`, `Head to ${g.field}. You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id);
         }
         this.checkUpNext();
         break;
@@ -788,6 +819,13 @@ export class EventRoom extends DurableObject {
         g.notifiedNext = [];
         for (const pid of was) this.notifyPlayer(pid, `Game ${g.number} was cleared`, 'The organizer took everyone off that game. Put your name down again if you want to play.');
         this.checkUpNext();
+        break;
+      }
+      case 'field': {
+        const f = cleanField(b.field);
+        if (!f) fail(400, 'Pick a field');
+        g.field = f;
+        if (g.status === 'playing') for (const pid of gamePlayers(g)) this.notifyPlayer(pid, `Game ${g.number} moved to ${f}`, `Head to ${f}.`, 'game-' + g.id);
         break;
       }
       case 'pinnies':

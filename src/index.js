@@ -2,6 +2,7 @@
 // Static files in /public are served automatically. This Worker handles /api/*
 // and hands each request to the right Durable Object.
 import { json, errorResponse, readJson, fail, newId } from './util.js';
+import { emailConfigured } from './email.js';
 export { Registry } from './registry.js';
 export { EventRoom } from './room.js';
 
@@ -34,7 +35,7 @@ async function handleApi(request, env) {
   let m;
 
   if (method === 'GET' && path === '/api/config') {
-    return json({ vapidPublicKey: await registry.getPublicKey(), signupCodeRequired: !!env.MANAGER_SIGNUP_CODE });
+    return json({ vapidPublicKey: await registry.getPublicKey(), signupCodeRequired: !!env.MANAGER_SIGNUP_CODE, emailConfigured: emailConfigured(env) });
   }
 
   /* ----- organizer accounts ----- */
@@ -45,6 +46,20 @@ async function handleApi(request, env) {
   if (method === 'POST' && path === '/api/manager/login') {
     const b = await readJson(request);
     return json(rpc(await registry.login({ ...b, ip })));
+  }
+  // Account recovery (no sign-in needed). Links point back at this site (or APP_URL if set).
+  const origin = (env.APP_URL || url.origin).replace(/\/+$/, '');
+  if (method === 'POST' && path === '/api/manager/forgot-password') {
+    const b = await readJson(request);
+    return json(rpc(await registry.forgotPassword({ who: b.who, ip, origin })));
+  }
+  if (method === 'POST' && path === '/api/manager/forgot-username') {
+    const b = await readJson(request);
+    return json(rpc(await registry.forgotUsername({ email: b.email, ip, origin })));
+  }
+  if (method === 'POST' && path === '/api/manager/reset-password') {
+    const b = await readJson(request);
+    return json(rpc(await registry.resetPassword({ token: b.token, password: b.password })));
   }
   if (method === 'POST' && path === '/api/manager/logout') {
     return json(await registry.logout(bearer(request)));
@@ -75,7 +90,14 @@ async function handleApi(request, env) {
     if (!mgr) fail(401, 'Please sign in again');
 
     if (method === 'GET' && path === '/api/manager/me') {
-      return json({ username: mgr.username, events: await registry.listEvents(mgr.id) });
+      return json({ username: mgr.username, email: mgr.email, events: await registry.listEvents(mgr.id) });
+    }
+    if (method === 'GET' && path === '/api/manager/account') {
+      return json({ username: mgr.username, email: mgr.email });
+    }
+    if (method === 'POST' && path === '/api/manager/account') {
+      const b = await readJson(request);
+      return json(rpc(await registry.updateAccount({ username: mgr.username, email: b.email, currentPassword: b.currentPassword, newPassword: b.newPassword })));
     }
     if (method === 'POST' && path === '/api/manager/events') {
       const b = await readJson(request);

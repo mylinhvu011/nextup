@@ -44,6 +44,26 @@ npx wrangler secret put MANAGER_SIGNUP_CODE
 ```
 Type a code when asked. New organizers then need that code to create an account.
 
+### Email for account recovery (password reset, forgot username)
+
+Organizers sign up with an email so they can reset a forgotten password or get their username sent to them. To actually send those emails, connect one free email service. Until you do, the forgot-password screens show a note that email isn't set up yet.
+
+**Option A: Brevo (no domain needed).** Free plan: 300 emails a day; free emails carry a small "Sent with Brevo" footer.
+1. Sign up at brevo.com.
+2. Add and verify a sender: Senders, Domains & Dedicated IPs → Senders → Add a sender (use the email you want resets to come from).
+3. Create an API key: SMTP & API → API Keys → Generate.
+4. Run `npx wrangler secret put BREVO_API_KEY` and paste the key.
+5. In `wrangler.jsonc`, set `"MAIL_FROM"` to the sender email you verified, then `npm run deploy`.
+
+**Option B: Resend (needs a domain you own).** Free plan: 3,000 emails a month, 100 a day.
+1. Sign up at resend.com, add your domain and add the DNS records it shows.
+2. Create an API key, then run `npx wrangler secret put RESEND_API_KEY`.
+3. Set `"MAIL_FROM"` to an address on that domain (e.g. `noreply@yourdomain.com`), then `npm run deploy`.
+
+Optional: set `APP_URL` (e.g. `https://next-up.yourname.workers.dev`) if you want reset links to always use one address. Reset links work once, for 1 hour, and at most one is sent per account per minute. Resetting or changing a password signs the organizer out on every other device.
+
+Test it: on the organizer sign-in page tap **Forgot password?**, enter your username, and check your inbox (and spam folder).
+
 ### Use your own domain (optional)
 In the Cloudflare dashboard → Workers & Pages → next-up → Settings → Domains & Routes → Add custom domain.
 
@@ -65,15 +85,19 @@ npm test           # checks the rules, live updates, timers and push encryption
 |---|---|
 | Players per team | 5 = 5v5 = 10 names per game |
 | Game length | Timer length in minutes |
-| Boards | How many games can be on the list at once (like 3 whiteboards), or **Unlimited** |
+| Boards in the line | How many waiting games are shown at once (like 3 whiteboards). The line is always filled to this number with empty boards; the game on the field doesn't count. Or **Unlimited** |
 | Sign-ups per person | How many games one person can be on at a time (1, 2, 3…), or **Unlimited** |
 | Games at the same time | Number of fields running at once |
 | Heads-up alert | Minutes before the end to tell the next game to get ready (0 = off) |
 | Pinnies go to | Which team gets pinnies on new games (swap per game any time) |
 | Players choose their team | Otherwise names are split evenly automatically |
 | Players can take their name off | Otherwise only the organizer can |
+| Friends each player can add | Players tap **+ Add a friend** on a game to put a friend's name down (unlimited by default; 0 turns it off). The person who added them can pick and switch the friend's team or take them off a waiting game, and gets the friend's alerts. If the friend joins on their own phone with that name, the spot becomes theirs. |
+| Colors | Pick a scheme (Pitch green, Midnight, Crimson, Royal, Ocean, Sunset) or your own main / highlight / pinnie colors. Every phone on the event updates instantly when you save. |
 
-Built-in rules: nobody can sign up twice for the same game; names are unique within an event; a new board opens automatically when the current ones fill (until the board limit); ending a game clears its board and opens a fresh one — like erasing a whiteboard.
+**Last call:** the organizer can tap 🏁 **Last call** to stop new boards from being added. Games already on the board still play out, people can still take open spots on them, and everyone gets a notification. When the last game ends the organizer is told it's a wrap; **Reopen the line** undoes it.
+
+Built-in rules: nobody can sign up twice for the same game; names are unique within an event. With a board count of 3, the line always shows 3 waiting boards (empty or filling up); when a game starts it moves to the field and a fresh empty board joins the end of the line. Lowering the count only removes empty boards. With Unlimited, a new board opens whenever every board is full.
 
 ---
 
@@ -82,6 +106,13 @@ Built-in rules: nobody can sign up twice for the same game; names are unique wit
 - **Android / computers (Chrome, Edge, Firefox):** tap **Turn on** in the yellow bar and allow notifications. No install needed.
 - **iPhone / iPad (iOS 16.4+):** Apple only allows web notifications for sites on the Home Screen. Open the site in Safari → Share → **Add to Home Screen** → open Next Up from the new icon → **Turn on**. The app shows these steps automatically.
 - With the page open, it also beeps, vibrates and shows a banner when you're up.
+- The alerts banner stays at the top with **Turn on / Turn off**, so anyone can opt out (and back in) any time. Organizers have the same toggle for their own time's-up alerts.
+
+---
+
+### Getting it on phones as an app
+- Phones see a **"Get it as an app first"** card on the join screens (code and name) and on organizer sign-in, linking to a **help page** (`/#/install`) with steps for the exact phone and browser. On Android, Chrome's one-tap **Add to Home Screen** button appears right in the card.
+- Joined in the browser first? On iPhone the Home Screen app doesn't share sign-ins with Safari, so the help page gives a **move code** (6 letters, single use, 30 minutes). Typing it into the app's code box signs them in as the same person with the same game spots — no second name.
 
 ---
 

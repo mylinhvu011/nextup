@@ -576,6 +576,8 @@ function teamCol(s, g, team, opts) {
     if (opts.manager) ctrls = `
       <button class="iconbtn" title="Move to other team" aria-label="Move ${esc(p.name)} to other team" data-act="switch" data-gid="${g.id}" data-pid="${pid}">⇄</button>
       <button class="iconbtn" title="Remove from game" aria-label="Remove ${esc(p.name)}" data-act="rm-player" data-gid="${g.id}" data-pid="${pid}">✕</button>`;
+    else if (me && g.status === 'open' && s.settings.allowTeamPick) ctrls = `
+      <button class="iconbtn" title="Switch to the other team" aria-label="Switch to the other team" data-act="self-switch" data-gid="${g.id}">⇄</button>`;
     else if (mine && g.status === 'open') ctrls = `
       <button class="iconbtn" title="Move to other team" aria-label="Move ${esc(p.name)} to other team" data-act="friend-switch" data-gid="${g.id}" data-pid="${pid}">⇄</button>
       <button class="iconbtn" title="Take off this game" aria-label="Take ${esc(p.name)} off" data-act="friend-remove" data-gid="${g.id}" data-pid="${pid}">✕</button>`;
@@ -602,7 +604,7 @@ function boardHtml(s, g, opts) {
   const full = count >= s.settings.playersPerTeam * 2;
   const mine = opts.meId && inGame(g, opts.meId);
   let label;
-  if (g.status === 'playing') label = '<span class="tag live">On the field</span>';
+  if (g.status === 'playing') label = `<span class="tag live">${g.field ? esc(g.field) : 'On the field'}</span>`;
   else label = queueLabel(s, opts.idx) + (full ? '<span class="tag full">Full</span>' : '');
   const right = g.status === 'playing' ? timerHtml(g) : `<span class="muted small">${count}/${s.settings.playersPerTeam * 2}</span>`;
   return `<article class="board ${g.status} ${mine ? 'mine' : ''}" id="g-${g.id}">
@@ -627,7 +629,7 @@ function homeView(prefill = '') {
   const lastId = store.get('nu.lastEvent');
   const last = lastId && playerSession(lastId);
   app.innerHTML = `
-    ${last ? `<div class="card row"><div class="grow"><b>Welcome back, ${esc(last.name)}</b><div class="muted small">${esc(last.eventName || 'Your event')}</div></div><a class="btn primary" href="#/e/${esc(lastId)}">Open board</a></div>` : ''}
+    ${last ? `<div class="card row"><div class="grow"><b>You're signed in to ${esc(last.eventName || 'an event')}</b><div class="muted small">as ${esc(last.name)} · joining a different event signs you out of this one</div></div><a class="btn primary" href="#/e/${esc(lastId)}">Open my board</a></div>` : ''}
     <div id="nudgeSlot">${installNudge(prefill)}</div>
     <section class="card hero">
       <h1>Who's up next?</h1>
@@ -694,6 +696,11 @@ function homeView(prefill = '') {
           }
           r = await api('POST', '/api/join', { code, name: $('#name').value, confirmClaim: true });
           toast(r.rejoined ? `Welcome back, ${r.name} — you're signed back in` : `Welcome, ${r.name} — your spot is saved`, 'alert', 5000);
+        }
+        // One event per sign-in: leaving the previous event (like Kahoot) frees that name and spot.
+        if (last && lastId && lastId !== r.eventId) {
+          await papi(lastId, 'POST', `/api/events/${lastId}/signout`).catch(() => {});
+          store.del('nu.player.' + lastId);
         }
         store.set('nu.player.' + r.eventId, { token: r.token, playerId: r.playerId, name: r.name, eventName: found.name, eventCode: code });
         store.set('nu.lastEvent', r.eventId);
@@ -775,6 +782,11 @@ async function playerView(eventId) {
         toast(`${r.name} is on Game ${g.number} — you'll get their alerts`);
         return;
       }
+      if (a === 'self-switch') {
+        const r = await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/switch`);
+        toast(`You're on Team ${r.team === 'a' ? 1 : 2} now`);
+        return;
+      }
       if (a === 'friend-switch') {
         await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/friends/${pid}/switch`);
         return;
@@ -845,7 +857,7 @@ function renderPlayer(s, me) {
   if (myPlaying) {
     const team = myPlaying.teams.a.includes(me.id) ? 'a' : 'b';
     status = `<div class="card status playing"><div><div class="big">You're playing</div></div>${timerHtml(myPlaying)}
-      <div class="sub">Game ${myPlaying.number} · Team ${team === 'a' ? 1 : 2} · ${myPlaying.pinnies === team ? '<b>wear a pinnie</b>' : 'no pinnie'}</div></div>`;
+      <div class="sub">${myPlaying.field ? `<b>${esc(myPlaying.field)}</b> · ` : ''}Game ${myPlaying.number} · Team ${team === 'a' ? 1 : 2} · ${myPlaying.pinnies === team ? '<b>wear a pinnie</b>' : 'no pinnie'}</div></div>`;
   } else if (myOpenIdx >= 0) {
     const g = open[myOpenIdx];
     const team = g.teams.a.includes(me.id) ? 'a' : 'b';
@@ -924,42 +936,174 @@ async function shareJoin(code) {
 /* ================================================================== */
 /* ORGANIZER                                                          */
 /* ================================================================== */
-function managerAuthView() {
+function managerAuthView(startMode = 'login') {
   topnav.innerHTML = `<a href="#/">Join a game</a>`;
-  let mode = 'login';
+  let mode = startMode, sentTo = null;
+  const noEmail = !cfg.emailConfigured
+    ? `<p class="note-warn">Email isn't set up on this site yet, so recovery emails can't be sent. The site owner needs to finish the email step in the README.</p>` : '';
   const draw = () => {
-    app.innerHTML = `
-      <div style="max-width:440px;margin:0 auto">${installNudge('', 'organizer')}</div>
-      <section class="card" style="max-width:440px;margin:20px auto">
+    let body;
+    if (mode === 'login' || mode === 'register') {
+      body = `
         <h2>Organizer</h2>
         <p class="muted small">Sign in to create events, run the line and manage games.</p>
         <div class="tabs seg" role="tablist" style="display:flex">
           <button type="button" class="grow" aria-pressed="${mode === 'login'}" data-mode="login">Sign in</button>
           <button type="button" class="grow" aria-pressed="${mode === 'register'}" data-mode="register">Create account</button>
         </div>
-        <form id="authForm" class="stack">
-          <div><label for="u">Username</label><input id="u" autocomplete="username" autocapitalize="none" required></div>
-          <div><label for="p">Password</label><input id="p" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" required minlength="6"></div>
-          ${mode === 'register' && cfg.signupCodeRequired ? `<div><label for="sc">Organizer sign-up code</label><input id="sc" required></div>` : ''}
+        <form id="authForm" class="stack" novalidate>
+          <div><label for="u">${mode === 'login' ? 'Username or email' : 'Username'}</label><input id="u" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+          ${mode === 'register' ? `<div><label for="em">Email</label><input id="em" type="email" autocomplete="email" autocapitalize="none" spellcheck="false" placeholder="you@example.com">
+            <div class="field-hint">Only used to reset your password or remind you of your username.</div></div>` : ''}
+          <div><label for="p">Password</label><input id="p" type="password" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}" minlength="6"></div>
+          ${mode === 'register' && cfg.signupCodeRequired ? `<div><label for="sc">Organizer sign-up code</label><input id="sc"></div>` : ''}
           <button class="btn primary block" type="submit">${mode === 'login' ? 'Sign in' : 'Create account'}</button>
           <p class="err" id="authErr"></p>
         </form>
-      </section>
+        ${mode === 'login' ? `<div class="forgot-links"><button type="button" class="linkbtn" data-mode="forgot-pw">Forgot password?</button><button type="button" class="linkbtn" data-mode="forgot-user">Forgot username?</button></div>` : ''}`;
+    } else if (sentTo) {
+      body = `
+        <h2>Check your email</h2>
+        <p>${mode === 'forgot-pw'
+          ? 'If that matches an organizer account, we just sent a link to choose a new password. It works once, for 1 hour.'
+          : 'If that email is on an organizer account, we just sent your username to it.'}</p>
+        <p class="muted small">Nothing there after a few minutes? Check your spam folder, or try again.</p>
+        ${noEmail}
+        <div class="stack"><button type="button" class="btn primary block" data-mode="login">Back to sign in</button></div>`;
+    } else {
+      const pw = mode === 'forgot-pw';
+      body = `
+        <h2>${pw ? 'Reset your password' : 'Find your username'}</h2>
+        <p class="muted small">${pw ? "Enter your username or the email on your account and we'll email you a link to choose a new password." : "Enter the email on your account and we'll email you your username."}</p>
+        <form id="forgotForm" class="stack" novalidate>
+          <div><label for="fw">${pw ? 'Username or email' : 'Email'}</label><input id="fw" ${pw ? '' : 'type="email"'} autocomplete="${pw ? 'username' : 'email'}" autocapitalize="none" spellcheck="false"></div>
+          <button class="btn primary block" type="submit">${pw ? 'Email me a reset link' : 'Email me my username'}</button>
+          <p class="err" id="fErr"></p>
+        </form>
+        ${noEmail}
+        <div class="forgot-links"><button type="button" class="linkbtn" data-mode="login">← Back to sign in</button>${pw ? '<button type="button" class="linkbtn" data-mode="forgot-user">Forgot username?</button>' : '<button type="button" class="linkbtn" data-mode="forgot-pw">Forgot password?</button>'}</div>`;
+    }
+    app.innerHTML = `
+      <div style="max-width:440px;margin:0 auto">${installNudge('', 'organizer')}</div>
+      <section class="card" style="max-width:440px;margin:20px auto">${body}</section>
       <p class="muted small" style="text-align:center">Here to play? <a href="#/">Join a game as a player</a></p>`;
-    $$('[data-mode]').forEach(b => b.onclick = () => { mode = b.dataset.mode; draw(); });
-    $('#authForm').onsubmit = async e => {
-      e.preventDefault();
-      try {
-        const body = { username: $('#u').value, password: $('#p').value };
+    $$('[data-mode]').forEach(b => b.onclick = () => { mode = b.dataset.mode; sentTo = null; draw(); });
+    const auth = $('#authForm');
+    if (auth) {
+      auth.onsubmit = async e => {
+        e.preventDefault();
+        const errEl = $('#authErr'); errEl.textContent = '';
+        const body = { username: $('#u').value.trim(), password: $('#p').value };
+        if (!body.username) { errEl.textContent = mode === 'login' ? 'Enter your username or email' : 'Choose a username'; return $('#u').focus(); }
+        if (mode === 'register') {
+          body.email = $('#em').value.trim();
+          if (!body.email) { errEl.textContent = 'Enter your email — it lets you reset your password if you forget it'; return $('#em').focus(); }
+        }
+        if (!body.password) { errEl.textContent = 'Enter your password'; return $('#p').focus(); }
         if ($('#sc')) body.signupCode = $('#sc').value;
-        const r = await api('POST', `/api/manager/${mode}`, body);
-        store.set('nu.manager', r);
-        route();
-      } catch (ex) { $('#authErr').textContent = ex.message; }
-    };
-    $('#u').focus();
+        try {
+          const r = await api('POST', `/api/manager/${mode}`, body);
+          store.set('nu.manager', r);
+          route();
+        } catch (ex) { errEl.textContent = ex.message; }
+      };
+      $('#u').focus();
+    }
+    const fg = $('#forgotForm');
+    if (fg) {
+      fg.onsubmit = async e => {
+        e.preventDefault();
+        const v = $('#fw').value.trim();
+        if (!v) { $('#fErr').textContent = mode === 'forgot-pw' ? 'Enter your username or email' : 'Enter your email'; return; }
+        try {
+          await api('POST', mode === 'forgot-pw' ? '/api/manager/forgot-password' : '/api/manager/forgot-username', mode === 'forgot-pw' ? { who: v } : { email: v });
+          sentTo = v; draw();
+        } catch (ex) { $('#fErr').textContent = ex.message; }
+      };
+      $('#fw').focus();
+    }
   };
   draw();
+}
+
+// Reset link from the email: choose a new password, then you're signed in.
+function resetView(token) {
+  topnav.innerHTML = `<a href="#/manager">Organizer sign in</a>`;
+  app.innerHTML = `
+    <section class="card" style="max-width:440px;margin:20px auto">
+      <h2>Choose a new password</h2>
+      <form id="resetForm" class="stack" novalidate>
+        <div><label for="np">New password</label><input id="np" type="password" autocomplete="new-password" minlength="6"></div>
+        <div><label for="np2">Type it again</label><input id="np2" type="password" autocomplete="new-password" minlength="6"></div>
+        <button class="btn primary block" type="submit">Save new password</button>
+        <p class="err" id="rErr"></p>
+      </form>
+      <p class="muted small">Saving signs you out on every other device.</p>
+    </section>`;
+  $('#resetForm').onsubmit = async e => {
+    e.preventDefault();
+    const a = $('#np').value, b = $('#np2').value, errEl = $('#rErr');
+    if (a.length < 6) { errEl.textContent = 'Use at least 6 characters'; return; }
+    if (a !== b) { errEl.textContent = "The two passwords don't match"; return; }
+    try {
+      const r = await api('POST', '/api/manager/reset-password', { token, password: a });
+      store.set('nu.manager', r);
+      toast('Password changed — you are signed in', 'alert');
+      location.hash = '#/manager';
+    } catch (ex) { errEl.innerHTML = `${esc(ex.message)} <button type="button" class="linkbtn" id="again">Send a new link</button>`; $('#again').onclick = () => { location.hash = '#/manager/forgot'; }; }
+  };
+  $('#np').focus();
+}
+
+// Organizer account: email + password.
+async function accountView() {
+  app.innerHTML = '<div class="spinner"></div>';
+  let acct;
+  try { acct = await mapi('GET', '/api/manager/account'); }
+  catch (e) { if (e.status === 401) { store.del('nu.manager'); return managerAuthView(); } app.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  topnav.innerHTML = `<a href="#/manager">← Your events</a>`;
+  app.innerHTML = `
+    <div class="page-head">
+      <a class="back" href="#/manager" aria-label="Back to your events"><svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.5L7.5 11l6.5 6.5"></path></svg></a>
+      <h1>Account</h1>
+    </div>
+    <section class="card stack">
+      <div><span class="muted small">Username</span><div style="font-weight:700;font-size:17px">${esc(acct.username)}</div></div>
+      <form id="emailForm" class="stack" novalidate>
+        <div><label for="ae">Email</label><input id="ae" type="email" autocomplete="email" autocapitalize="none" value="${esc(acct.email || '')}" placeholder="you@example.com">
+          <div class="field-hint">Used to reset your password or remind you of your username.</div></div>
+        <button class="btn primary" type="submit">Save email</button>
+        <p class="err" id="eErr"></p>
+      </form>
+    </section>
+    <section class="card">
+      <h2 style="font-size:20px">Change password</h2>
+      <form id="pwForm" class="stack" novalidate>
+        <div><label for="cp">Current password</label><input id="cp" type="password" autocomplete="current-password"></div>
+        <div><label for="np">New password</label><input id="np" type="password" autocomplete="new-password" minlength="6"></div>
+        <div><label for="np2">Type it again</label><input id="np2" type="password" autocomplete="new-password"></div>
+        <button class="btn primary" type="submit">Change password</button>
+        <p class="err" id="pErr"></p>
+        <p class="field-hint">Changing it signs you out on every other device.</p>
+      </form>
+    </section>`;
+  $('#emailForm').onsubmit = async e => {
+    e.preventDefault(); $('#eErr').textContent = '';
+    try { await mapi('POST', '/api/manager/account', { email: $('#ae').value.trim() }); toast('Email saved'); }
+    catch (ex) { $('#eErr').textContent = ex.message; }
+  };
+  $('#pwForm').onsubmit = async e => {
+    e.preventDefault(); const errEl = $('#pErr'); errEl.textContent = '';
+    const a = $('#np').value, b = $('#np2').value;
+    if (a.length < 6) { errEl.textContent = 'New password: at least 6 characters'; return; }
+    if (a !== b) { errEl.textContent = "The two new passwords don't match"; return; }
+    try {
+      const r = await mapi('POST', '/api/manager/account', { currentPassword: $('#cp').value, newPassword: a });
+      if (r.token) store.set('nu.manager', { token: r.token, username: r.username });
+      $('#pwForm').reset();
+      toast('Password changed');
+    } catch (ex) { errEl.textContent = ex.message; }
+  };
 }
 
 /* ---------------- event settings editor (−/+ steppers, No-limit switches) ---------------- */
@@ -994,6 +1138,9 @@ function stepperRow(id, title, hint, val, { min, max, less, more, unl = null, un
 function switchRow(id, title, on) {
   return `<div class="set-row"><span class="set-title">${title}</span><button type="button" role="switch" class="switch" id="${id}" aria-checked="${!!on}" aria-label="${title}"></button></div>`;
 }
+function fieldNameInputs(n, names) {
+  return Array.from({ length: n }, (_, i) => `<input class="fn-input" data-i="${i}" maxlength="24" value="${esc((names[i] || '').trim() || `Field ${i + 1}`)}" aria-label="Name of field ${i + 1}">`).join('');
+}
 function settingsFields(st) {
   const friends = st.maxFriends === undefined ? null : st.maxFriends;
   return `
@@ -1001,6 +1148,10 @@ function settingsFields(st) {
       ${stepperRow('s_ppt', 'Players per team', 'names per game', st.playersPerTeam, { min: 1, max: 30, less: 'Fewer players per team', more: 'More players per team' })}
       ${stepperRow('s_min', 'Game length', 'Timer for each game', st.gameMinutes, { min: 1, max: 180, less: 'Shorter games', more: 'Longer games' })}
       ${stepperRow('s_fields', 'Games at once', 'Fields in use', st.fields, { min: 1, max: 10, less: 'Fewer fields', more: 'More fields' })}
+      <div class="set-fields" id="fieldNames" data-names="${esc(JSON.stringify(st.fieldNames || []))}">
+        <span class="set-hint">Field names — shown to players and picked when a game starts</span>
+        <div class="fn-grid">${fieldNameInputs(st.fields || 1, st.fieldNames || [])}</div>
+      </div>
     </section>
     <section class="set-group"><h3>The line</h3>
       ${stepperRow('s_boards', 'Boards in the line', "Like whiteboards — the game on the field doesn't count", st.maxBoards, { min: 1, max: 50, less: 'Fewer boards', more: 'More boards', unl: st.maxBoards === null, unlLabel: 'No limit on boards' })}
@@ -1035,6 +1186,7 @@ function wireSettings(root) {
       st.dataset.val = v;
       $('output', st).textContent = stepValText(id, v);
       const h = stepHint(id, v); if (h && $('#' + id + '_hint', root)) $('#' + id + '_hint', root).textContent = h;
+      if (id === 's_fields') { const names = readFieldNames(root); $('#fieldNames .fn-grid', root).innerHTML = fieldNameInputs(v, names); }
       changed();
     };
     $$('[data-step]', st).forEach(b => b.onclick = () => {
@@ -1059,11 +1211,23 @@ function wireSettings(root) {
     }
     changed();
   });
+  const fn = $('#fieldNames', root);
+  if (fn) fn.addEventListener('input', changed);
   const pin = $('#s_pin', root);
   if (pin) $$('button', pin).forEach(b => b.onclick = () => {
     $$('button', pin).forEach(x => x.setAttribute('aria-pressed', x === b));
     changed();
   });
+}
+// Every field name typed so far (kept even when the field count goes down, so going back up restores them).
+function readFieldNames(root) {
+  const box = $('#fieldNames', root);
+  if (!box) return [];
+  let names = [];
+  try { names = JSON.parse(box.dataset.names || '[]'); } catch {}
+  $$('.fn-input', box).forEach(inp => { names[+inp.dataset.i] = inp.value.replace(/\s+/g, ' ').trim() || `Field ${+inp.dataset.i + 1}`; });
+  box.dataset.names = JSON.stringify(names);
+  return names;
 }
 function readSettings(root) {
   const val = id => +$(`.stepper[data-id="${id}"]`, root).dataset.val;
@@ -1073,6 +1237,7 @@ function readSettings(root) {
     playersPerTeam: val('s_ppt'),
     gameMinutes: val('s_min'),
     fields: val('s_fields'),
+    fieldNames: readFieldNames(root).slice(0, 10),
     maxBoards: unl('s_boards') ? null : val('s_boards'),
     maxSignups: unl('s_signups') ? null : val('s_signups'),
     maxFriends: unl('s_friends') ? null : val('s_friends'),
@@ -1098,13 +1263,19 @@ function settingsChips(st) {
     st.warnMinutes ? `Heads-up ${st.warnMinutes} min` : 'No heads-up',
     `Pinnies: Team ${st.defaultPinnies === 'b' ? 2 : 1}`
   ];
-  if (st.fields > 1) chips.splice(2, 0, `${st.fields} games at once`);
-  if (st.allowTeamPick) chips.push('Players pick teams');
+  const fnames = fieldNamesOf(st);
+  if (st.fields > 1) chips.splice(2, 0, `${st.fields} fields: ${fnames.join(', ')}`);
+  else if (fnames[0] !== 'Field 1') chips.splice(2, 0, `Field: ${fnames[0]}`);
+  if (!st.allowTeamPick) chips.push('Organizer picks teams');
   if (!st.allowLeave) chips.push("Can't take name off");
   return chips.map(c => `<span class="chip">${esc(c)}</span>`).join('') +
     `<span class="chip">${chipsHtml(t)}${esc(tname)}</span>`;
 }
-const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1, warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: false, allowLeave: true };
+const DEFAULTS = { playersPerTeam: 5, gameMinutes: 10, maxBoards: 3, maxSignups: 1, maxFriends: null, fields: 1, fieldNames: [], warnMinutes: 2, defaultPinnies: 'a', allowTeamPick: true, allowLeave: true };
+// Field names for an event's settings, padded with "Field N".
+const fieldNamesOf = st => Array.from({ length: Math.max(1, st.fields || 1) }, (_, i) =>
+  (((st.fieldNames || [])[i]) || '').trim() || `Field ${i + 1}`);
+const fieldChoice = {}; // organizer's pick of field for a waiting game, kept across re-renders
 
 /* ---------------- organizer home: live → new event → ended ---------------- */
 const chev = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"></path></svg>';
@@ -1120,11 +1291,12 @@ async function managerHomeView() {
   let me;
   try { me = await mapi('GET', '/api/manager/me'); }
   catch (e) { if (e.status === 401) { store.del('nu.manager'); return managerAuthView(); } app.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-  topnav.innerHTML = `<span class="who">${esc(me.username)}</span><button id="logout">Sign out</button>`;
+  topnav.innerHTML = `<a class="who" href="#/manager/account" title="Account">${esc(me.username)}</a><button id="logout">Sign out</button>`;
   $('#logout').onclick = async () => { await mapi('POST', '/api/manager/logout').catch(() => {}); store.del('nu.manager'); route(); };
+  const emailNote = me.email ? '' : `<div class="alertbar"><span><b>Add an email</b> so you can reset your password if you ever forget it.</span><a class="btn lime small" href="#/manager/account">Add email</a></div>`;
 
   if (!me.events.length) {
-    app.innerHTML = `<section class="empty-home">
+    app.innerHTML = `${emailNote}<section class="empty-home">
       <svg width="150" height="110" viewBox="0 0 150 110" fill="none" role="img" aria-label="Three empty sign-up boards">
         <rect x="6" y="18" width="42" height="56" rx="6" stroke="currentColor" stroke-width="2.5"></rect>
         <rect x="54" y="10" width="42" height="64" rx="6" stroke="currentColor" stroke-width="2.5" fill="var(--surface)"></rect>
@@ -1167,6 +1339,7 @@ async function managerHomeView() {
       <span class="grow"><b>${esc(e.name)}</b><span>${d} · ${e.gamesPlayed} game${e.gamesPlayed === 1 ? '' : 's'} · ${e.players} player${e.players === 1 ? '' : 's'}</span></span>${chev}</a>`;
   };
   app.innerHTML = `
+    ${emailNote}
     ${liveEvents.length ? `<h2 class="section-title" style="margin-top:4px">Live now</h2>
       <div class="ev-list">${liveEvents.map(liveCard).join('')}</div>` : ''}
     <a class="new-cta" href="#/manager/new" style="${liveEvents.length ? '' : 'margin-top:4px'}">
@@ -1304,7 +1477,10 @@ async function managerEventView(eventId) {
         case 'start': {
           const busy = s.games.filter(x => x.status === 'playing').length;
           if (busy >= s.settings.fields && !(await uiConfirm(`${busy === 1 ? 'A game is' : `${busy} games are`} still on the field. Start Game ${g.number} anyway?`))) return;
-          await gameAct(gid, 'start'); break;
+          const sel = app.querySelector(`.pick-start[data-gid="${gid}"]`);
+          await gameAct(gid, 'start', { field: sel && sel.value !== '__other' ? sel.value : undefined });
+          delete fieldChoice[gid];
+          break;
         }
         case 'pause': case 'resume': case 'reset': case 'pinnies': case 'up': case 'down':
           await gameAct(gid, a); break;
@@ -1377,6 +1553,22 @@ async function managerEventView(eventId) {
     if (el.isConnected) el.disabled = false;
   };
   const onClick = e => { const el = e.target.closest('[data-act]'); if (el && app.contains(el)) act(el); };
+  // Field dropdowns: pick for a waiting game, or move a game in progress. "Other…" asks for a name.
+  const onFieldChange = async e => {
+    const sel = e.target.closest('.field-pick');
+    if (!sel) return;
+    const gid = sel.dataset.gid, g = findG(gid);
+    let val = sel.value;
+    if (val === '__other') {
+      val = (await uiPrompt(`Field name for Game ${g ? g.number : ''}:`, '', { ok: 'Use this field' }) || '').trim().slice(0, 24);
+      if (!val) { render(); return; }
+    }
+    try {
+      if (sel.classList.contains('pick-move')) { await gameAct(gid, 'field', { field: val }); toast(`Game ${g.number} is on ${val}`); }
+      else { fieldChoice[gid] = val; render(); }
+    } catch (ex) { toast(ex.message, 'warn'); render(); }
+  };
+  app.addEventListener('change', onFieldChange);
   const onSubmit = async e => {
     const f = e.target.closest('form[data-walkup]');
     if (!f) return;
@@ -1416,7 +1608,7 @@ async function managerEventView(eventId) {
     dlg.showModal();
   }
 
-  view = { cleanup() { es.close(); render.dispose(); app.removeEventListener('click', onClick); app.removeEventListener('submit', onSubmit); if (dlg.open) dlg.close(); live = null; } };
+  view = { cleanup() { es.close(); render.dispose(); app.removeEventListener('click', onClick); app.removeEventListener('change', onFieldChange); app.removeEventListener('submit', onSubmit); if (dlg.open) dlg.close(); live = null; } };
 }
 
 function renderManager(s) {
@@ -1452,6 +1644,13 @@ function renderManager(s) {
     return;
   }
 
+  const names = fieldNamesOf(st);
+  const busyFields = new Set(playing.map(g => g.field));
+  const firstFree = names.find(n => !busyFields.has(n)) || names[0];
+  const fieldSelect = (cls, gid, current, label) => {
+    const opts = [...new Set([...names, current].filter(Boolean))];
+    return `<select class="field-pick ${cls}" data-gid="${gid}" aria-label="${label}">${opts.map(n => `<option value="${esc(n)}" ${n === current ? 'selected' : ''}>${esc(n)}</option>`).join('')}<option value="__other">Other…</option></select>`;
+  };
   const playingHtml = playing.length ? playing.map(g => {
     const rem = remaining(g);
     const t = g.timer;
@@ -1462,6 +1661,7 @@ function renderManager(s) {
         <button class="btn small" data-act="addtime" data-sec="-60" data-gid="${g.id}">−1 min</button>
         <button class="btn small" data-act="addtime" data-sec="60" data-gid="${g.id}">+1 min</button>
         <button class="btn small" data-act="pinnies" data-gid="${g.id}">Swap pinnies</button>
+        ${fieldSelect('pick-move', g.id, g.field || names[0], `Field for Game ${g.number}`)}
       </div>
       <button class="btn small solid-danger" data-act="end" data-gid="${g.id}">End &amp; clear</button>
       <form data-walkup="${g.id}"><input placeholder="Add sub / walk-up name" maxlength="24" aria-label="Add player to Game ${g.number}"><button class="btn small">Add</button></form>`;
@@ -1476,7 +1676,8 @@ function renderManager(s) {
     return `<button class="btn small danger" data-act="delete" data-gid="${g.id}">Delete</button>`;
   };
   const queueHtml = open.length ? open.map((g, idx) => {
-    const footer = `<button class="btn small primary" data-act="start" data-gid="${g.id}">▶ Start game</button>
+    const pick = fieldChoice[g.id] || firstFree;
+    const footer = `<div class="start-group">${fieldSelect('pick-start', g.id, pick, `Field for Game ${g.number}`)}<button class="btn small primary" data-act="start" data-gid="${g.id}">▶ Start game</button></div>
       <button class="iconbtn" title="Move up" aria-label="Move up" data-act="up" data-gid="${g.id}" ${idx === 0 ? 'disabled' : ''}>↑</button>
       <button class="iconbtn" title="Move down" aria-label="Move down" data-act="down" data-gid="${g.id}" ${idx === open.length - 1 ? 'disabled' : ''}>↓</button>
       <button class="btn small" data-act="pinnies" data-gid="${g.id}">Swap pinnies</button>
@@ -1576,16 +1777,25 @@ function route() {
   const brand = document.querySelector('.brand');
   if (brand) {
     const org = h.startsWith('/manager');
-    brand.setAttribute('href', org ? '#/manager' : '#/');
+    const lid = store.get('nu.lastEvent');
+    brand.setAttribute('href', org ? '#/manager' : (lid && playerSession(lid) ? '#/e/' + lid : '#/'));
     brand.setAttribute('aria-label', org ? 'Next Up — your events' : 'Next Up home');
   }
   if ((m = h.match(/^\/e\/([\w-]+)$/))) return playerView(m[1]);
+  // Signed in to an event? The home page is that event's board (one event per sign-in).
+  if (h === '/') {
+    const lid = store.get('nu.lastEvent');
+    if (lid && playerSession(lid)) { history.replaceState(null, '', '#/e/' + lid); return playerView(lid); }
+  }
   if ((m = h.match(/^\/join\/(.+)$/))) return homeView(decodeURIComponent(m[1]));
   if (h === '/install') return installView();
   if ((m = h.match(/^\/install\/(.+)$/))) return installView(decodeURIComponent(m[1]));
   if ((m = h.match(/^\/manager\/e\/([\w-]+)$/))) return mgrSession() ? managerEventView(m[1]) : managerAuthView();
   if (h === '/manager') return mgrSession() ? managerHomeView() : managerAuthView();
   if (h === '/manager/new') return mgrSession() ? newEventView() : managerAuthView();
+  if (h === '/manager/account') return mgrSession() ? accountView() : managerAuthView();
+  if (h === '/manager/forgot') return managerAuthView('forgot-pw');
+  if ((m = h.match(/^\/reset\/([\w-]+)$/))) return resetView(m[1]);
   return homeView();
 }
 
