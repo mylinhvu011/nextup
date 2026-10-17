@@ -48,7 +48,7 @@ const ymdUTC = ms => new Date(ms).toISOString().slice(0, 10);
     const today = new Date().getUTCDay();
     const started = Date.now() - 10 * 60000;
     const sr = await ok(call('POST', '/api/manager/series', {
-      name: 'Weekly', settings: { playersPerTeam: 2, tz, closeMode: 'hours', closeHours: 12 },
+      name: 'Weekly', settings: { playersPerTeam: 2, tz, closeMode: 'hours', closeHours: 3 },
       schedule: { days: [today], everyWeeks: 2, startTime: hm(started), opensBefore: 0 }
     }, M));
     assert.match(sr.code, /^\d{4}$/);
