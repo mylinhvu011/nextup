@@ -65,7 +65,20 @@ const gamePlayers = g => [...g.teams.a, ...g.teams.b];
 const isFull = (ev, g) => gamePlayers(g).length >= teamCap(ev) * 2;
 const openGames = ev => ev.games.filter(g => g.status === 'open');
 const playingGames = ev => ev.games.filter(g => g.status === 'playing');
+const REPEAT_MS = 30000, REPEAT_TIMES = 2; // buzzer alerts re-sent twice, 30 s apart, until answered
 const upNextGames = ev => openGames(ev).slice(0, ev.settings.fields);
+// Games are named by where they are, not by number: "Playing now", "On deck" (next to play),
+// "Almost there" (the round after), then "3rd in line", "4th in line"… With several fields,
+// each round of the line is as many boards as there are fields.
+const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th');
+function gameName(ev, g) {
+  if (g.status === 'playing') return 'Playing now';
+  const idx = openGames(ev).indexOf(g);
+  const wave = Math.floor(Math.max(0, idx) / Math.max(1, ev.settings.fields));
+  return wave === 0 ? 'On deck' : wave === 1 ? 'Almost there' : `${ordinal(wave + 1)} in line`;
+}
+// For sentences: "the game on Field 1", "the On deck game".
+const gameRef = (ev, g) => g.status === 'playing' ? (g.field ? `the game on ${g.field}` : 'the game playing now') : `the ${gameName(ev, g)} game`;
 const activeSignups = (ev, pid) => ev.games.filter(g => gamePlayers(g).includes(pid)).length;
 const findGame = (ev, gid) => ev.games.find(g => g.id === gid) || fail(404, 'That game is no longer on the board');
 const teamLabel = (g, team) => (g.pinnies === team ? 'the PINNIES team (grab a pinnie)' : 'the no-pinnies team');
@@ -136,6 +149,7 @@ export class EventRoom extends DurableObject {
     super(ctx, env);
     this.ev = null;
     // AUTO_CLOSE_SECONDS is only for tests: replaces the "close after N hours" length.
+    this.repeatMs = Number(env.BUZZ_REPEAT_SECONDS) > 0 ? Number(env.BUZZ_REPEAT_SECONDS) * 1000 : REPEAT_MS; // tests only
     this.testCloseMs = Number(env.AUTO_CLOSE_SECONDS) > 0 ? Number(env.AUTO_CLOSE_SECONDS) * 1000 : 0;
     ctx.blockConcurrencyWhile(async () => { this.ev = (await ctx.storage.get('ev')) || null; });
     // Answer keep-alive pings without waking the object.
@@ -211,20 +225,46 @@ export class EventRoom extends DurableObject {
     ev.pq = ev.pq || [];
     for (const sub of subs) if (ev.pq.length < 1000) ev.pq.push({ sub, payload, to });
   }
-  notifyPlayer(pid, title, body, tag) {
+  // big: the "buzzer" alerts (on deck, get ready, you're on, game started). The app takes over
+  // the screen with a siren until they tap "I'm coming", and push alerts repeat until then.
+  notifyPlayer(pid, title, body, tag, { big = false, gid = null } = {}) {
     const ev = this.ev;
     const p = ev.players[pid];
     if (!p) return;
-    const payload = { title, body, tag: tag || 'nextup-' + ev.id, url: `/#/e/${ev.id}` };
+    const payload = { title, body, tag: tag || 'nextup-' + ev.id, url: `/#/e/${ev.id}`, ...(big ? { big: true } : {}) };
     this.sendTo('p:' + pid, { type: 'notice', data: payload });
     if (p.subs.length) this.queuePush(p.subs, payload, pid);
+    if (big) this.queueRepeat(pid, pid, payload, gid);
     // A friend who isn't on their own phone: tell the person who added them.
     const host = p.guest && p.addedBy && ev.players[p.addedBy];
     if (host) {
-      const fwd = { title: `For ${p.name}: ${title}`, body, tag: (tag || 'nextup-' + ev.id) + '-' + pid, url: payload.url };
+      const fwd = { ...payload, title: `For ${p.name}: ${title}`, tag: (tag || 'nextup-' + ev.id) + '-' + pid };
       this.sendTo('p:' + host.id, { type: 'notice', data: fwd });
       if (host.subs.length) this.queuePush(host.subs, fwd, host.id);
+      if (big) this.queueRepeat(host.id, pid, fwd, gid);
     }
+  }
+  // Re-send a buzzer alert (REPEAT_TIMES more times, REPEAT_MS apart) until the phone answers.
+  queueRepeat(to, about, payload, gid) {
+    const ev = this.ev;
+    ev.rq = (ev.rq || []).filter(r => !(r.to === to && r.payload.tag === payload.tag));
+    if (!ev.players[to] || !ev.players[to].subs.length) return;
+    ev.rq.push({ to, about, gid, payload, at: Date.now() + this.repeatMs, left: REPEAT_TIMES });
+  }
+  runRepeats(now) {
+    const ev = this.ev;
+    if (!ev.rq || !ev.rq.length) return;
+    const keep = [];
+    for (const r of ev.rq) {
+      const p = ev.players[r.to];
+      const g = r.gid && ev.games.find(x => x.id === r.gid);
+      const stillOn = !r.gid || (g && gamePlayers(g).includes(r.about));
+      if (!p || !p.subs.length || !stillOn || ev.status !== 'active') continue;
+      if (r.at > now + 500) { keep.push(r); continue; }
+      this.queuePush(p.subs, { ...r.payload, body: r.payload.body + ' (Open Next Up to stop the alerts.)', repeat: true }, r.to);
+      if (--r.left > 0) { r.at = now + this.repeatMs; keep.push(r); }
+    }
+    ev.rq = keep;
   }
   notifyManager(title, body) {
     const ev = this.ev;
@@ -239,9 +279,9 @@ export class EventRoom extends DurableObject {
       for (const pid of gamePlayers(g)) {
         if (g.notifiedNext.includes(pid)) continue;
         g.notifiedNext.push(pid);
-        this.notifyPlayer(pid, "You're up next!",
-          anyPlaying ? `Game ${g.number} plays after the current game. Stay close to the field.` : `Game ${g.number} is first in line.`,
-          'game-' + g.id);
+        this.notifyPlayer(pid, "You're on deck!",
+          anyPlaying ? 'Your game plays right after the current one. Stay close to the field.' : 'Your game is first in line.',
+          'game-' + g.id, { big: true, gid: g.id });
       }
     }
   }
@@ -288,6 +328,7 @@ export class EventRoom extends DurableObject {
     if (!ev) return;
     let next = Infinity;
     if (ev.pq && ev.pq.length) next = Date.now();
+    for (const r of ev.rq || []) next = Math.min(next, r.at);
     if (ev.status === 'active') {
       next = Math.min(next, this.closeAt(ev));
       const warnMs = ev.settings.warnMinutes * 60000;
@@ -318,16 +359,16 @@ export class EventRoom extends DurableObject {
           const mins = Math.max(1, Math.round(rem / 60000));
           const ngw = openGames(ev)[0];
           if (ngw) for (const pid of gamePlayers(ngw)) {
-            this.notifyPlayer(pid, 'Get ready!', `About ${mins} min left in Game ${g.number}${at(g)}. You're on Game ${ngw.number} next — warm up.`, 'game-' + ngw.id);
+            this.notifyPlayer(pid, 'Get ready!', `About ${mins} min left in the current game${at(g)}. You're on next — warm up.`, 'game-' + ngw.id, { big: true, gid: ngw.id });
           }
         }
         if (!g.timeUp && rem <= 500) {
           g.timeUp = true; changed = true;
           t.running = false; t.endsAt = null; t.remainingMs = 0;
-          this.notifyManager(`Time's up — Game ${g.number}`, 'End the game to clear the board and bring on the next one.');
+          this.notifyManager(`Time's up${g.field ? ' on ' + g.field : ''}`, 'End the game to clear the board and bring on the next one.');
           const ngo = openGames(ev)[0];
           if (ngo) for (const pid of gamePlayers(ngo)) {
-            this.notifyPlayer(pid, "You're on!", `Game ${g.number} just finished. Head to ${g.field || 'the field'} for Game ${ngo.number}.`, 'game-' + ngo.id);
+            this.notifyPlayer(pid, "You're on!", `Time's up on the current game. Head to ${g.field || 'the field'} now.`, 'game-' + ngo.id, { big: true, gid: ngo.id });
           }
         }
       }
@@ -338,6 +379,7 @@ export class EventRoom extends DurableObject {
         try { await this.syncSummary(); } catch (e) { console.error(e); }
       }
     }
+    if (ev.status === 'active') this.runRepeats(Date.now());
     try { await this.drainPush(); } catch (e) { console.error(e); }
     await this.ctx.storage.put('ev', ev);
     if (changed) this.broadcast();
@@ -429,7 +471,7 @@ export class EventRoom extends DurableObject {
       if (!name) fail(400, 'Enter your name');
       let p = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
       const spotsOf = pl => ev.games.filter(g => gamePlayers(g).includes(pl.id)).map(g => ({
-        number: g.number, team: g.teams.a.includes(pl.id) ? 1 : 2, playing: g.status === 'playing'
+        number: g.number, label: gameName(ev, g), team: g.teams.a.includes(pl.id) ? 1 : 2, playing: g.status === 'playing'
       }));
       // Name already signed in (got logged out, switched phones, cleared the browser): confirm it's them.
       if (p && !p.guest) {
@@ -482,10 +524,16 @@ export class EventRoom extends DurableObject {
         await this.ctx.storage.put('ev', ev);
         return { moveCode: r.code, expiresInMin: 30 };
       }
+      // "I'm coming": stop repeat alerts for this phone.
+      if (method === 'POST' && path === '/p/ack') {
+        if (ev.rq && ev.rq.some(r => r.to === p.id)) { ev.rq = ev.rq.filter(r => r.to !== p.id); await this.commit(); }
+        return { ok: true };
+      }
       if (method === 'POST' && path === '/p/push/off') {
         p.subs = [];
         p.alertsOff = true;
         if (ev.pq) ev.pq = ev.pq.filter(item => item.to !== p.id);
+        if (ev.rq) ev.rq = ev.rq.filter(r => r.to !== p.id);
         await this.commit();
         return { ok: true };
       }
@@ -553,7 +601,7 @@ export class EventRoom extends DurableObject {
         if (f && f.addedBy && f.addedBy !== p.id && ev.players[f.addedBy]) fail(409, `${f.name} was already added by ${ev.players[f.addedBy].name}`);
         const myFriends = Object.values(ev.players).filter(x => x.guest && x.addedBy === p.id);
         if (!f && maxF !== null && myFriends.length >= maxF) fail(409, maxF === 1 ? 'You can add 1 friend at this event' : `You can add up to ${maxF} friends at this event`);
-        if (f && gamePlayers(g).includes(f.id)) fail(409, `${f.name} is already on Game ${g.number}`);
+        if (f && gamePlayers(g).includes(f.id)) fail(409, `${f.name} is already on that game`);
         const maxS = ev.settings.maxSignups;
         if (f && maxS !== null && activeSignups(ev, f.id) >= maxS) fail(409, `${f.name} is already on ${maxS === 1 ? 'a game' : maxS + ' games'}`);
         if (isFull(ev, g)) fail(409, 'That game is full');
@@ -733,7 +781,7 @@ export class EventRoom extends DurableObject {
         if (!name) fail(400, 'Enter a name');
         let p = Object.values(ev.players).find(x => x.name.toLowerCase() === name.toLowerCase());
         if (!p) { p = { id: newId(6), name, guest: true, walkup: true, subs: [], joinedAt: Date.now() }; ev.players[p.id] = p; }
-        if (gamePlayers(g).includes(p.id)) fail(409, `${p.name} is already on Game ${g.number}`);
+        if (gamePlayers(g).includes(p.id)) fail(409, `${p.name} is already on that game`);
         const team = pickTeam(ev, g, b.team);
         g.teams[team].push(p.id);
         if (g.status === 'playing') g.notifiedNext.push(p.id);
@@ -750,7 +798,7 @@ export class EventRoom extends DurableObject {
         if (!gamePlayers(g).includes(pid)) fail(404, 'Player is not on that game');
         if (m[3] === 'remove') {
           removeFromGame(g, pid);
-          this.notifyPlayer(pid, `Removed from Game ${g.number}`, 'The organizer took your name off that game.');
+          this.notifyPlayer(pid, 'Removed from a game', `The organizer took your name off ${gameRef(ev, g)}.`);
           ensureOpenBoard(ev);
         } else {
           const from = g.teams.a.includes(pid) ? 'a' : 'b';
@@ -758,7 +806,7 @@ export class EventRoom extends DurableObject {
           if (g.teams[to].length >= teamCap(ev)) fail(409, `Team ${to === 'a' ? 1 : 2} is full`);
           g.teams[from] = g.teams[from].filter(x => x !== pid);
           g.teams[to].push(pid);
-          if (g.status === 'playing') this.notifyPlayer(pid, 'Team switch', `You're now on ${teamLabel(g, to)} in Game ${g.number}.`);
+          if (g.status === 'playing') this.notifyPlayer(pid, 'Team switch', `You're now on ${teamLabel(g, to)} in ${gameRef(ev, g)}.`);
         }
         await this.commit();
         return { ok: true };
@@ -798,7 +846,7 @@ export class EventRoom extends DurableObject {
         ev.games = [...playingGames(ev), ...openGames(ev)];
         ensureOpenBoard(ev); // the game left the line, so a fresh board takes its place
         for (const team of ['a', 'b']) for (const pid of g.teams[team]) {
-          this.notifyPlayer(pid, `Game ${g.number} is on — ${g.field}!`, `Head to ${g.field}. You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id);
+          this.notifyPlayer(pid, `You're playing — ${g.field}!`, `Head to ${g.field}. You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id, { big: true, gid: g.id });
         }
         this.checkUpNext();
         break;
@@ -832,7 +880,7 @@ export class EventRoom extends DurableObject {
         if (g.status !== 'playing') fail(409, 'Only a game in progress can be ended');
         ev.games = ev.games.filter(x => x !== g);
         ev.history.push({
-          number: g.number, endedAt: Date.now(), pinnies: g.pinnies,
+          number: g.number, endedAt: Date.now(), pinnies: g.pinnies, field: g.field || null,
           teams: { a: g.teams.a.map(p => ev.players[p]?.name || '?'), b: g.teams.b.map(p => ev.players[p]?.name || '?') }
         });
         if (ev.history.length > 50) ev.history.shift();
@@ -843,8 +891,9 @@ export class EventRoom extends DurableObject {
       }
       case 'delete': {
         if (g.status === 'playing') fail(409, 'End the game instead of deleting it');
+        const ref = gameRef(ev, g);
         ev.games = ev.games.filter(x => x !== g);
-        for (const pid of gamePlayers(g)) this.notifyPlayer(pid, `Game ${g.number} was removed`, 'The organizer cleared that board. Put your name down on another game.');
+        for (const pid of gamePlayers(g)) this.notifyPlayer(pid, 'A game was removed', `The organizer removed ${ref}. Put your name down on another game.`);
         ensureOpenBoard(ev);
         this.checkUpNext();
         break;
@@ -855,7 +904,7 @@ export class EventRoom extends DurableObject {
         const was = gamePlayers(g);
         g.teams = { a: [], b: [] };
         g.notifiedNext = [];
-        for (const pid of was) this.notifyPlayer(pid, `Game ${g.number} was cleared`, 'The organizer took everyone off that game. Put your name down again if you want to play.');
+        for (const pid of was) this.notifyPlayer(pid, 'A game was cleared', `The organizer took everyone off ${gameRef(ev, g)}. Put your name down again if you want to play.`);
         this.checkUpNext();
         break;
       }
@@ -863,7 +912,7 @@ export class EventRoom extends DurableObject {
         const f = cleanField(b.field);
         if (!f) fail(400, 'Pick a field');
         g.field = f;
-        if (g.status === 'playing') for (const pid of gamePlayers(g)) this.notifyPlayer(pid, `Game ${g.number} moved to ${f}`, `Head to ${f}.`, 'game-' + g.id);
+        if (g.status === 'playing') for (const pid of gamePlayers(g)) this.notifyPlayer(pid, `Your game moved to ${f}`, `Head to ${f}.`, 'game-' + g.id, { big: true, gid: g.id });
         break;
       }
       case 'pinnies':

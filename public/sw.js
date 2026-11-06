@@ -6,13 +6,18 @@ self.addEventListener('push', event => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch { data = { title: 'Next Up', body: event.data && event.data.text() }; }
   const title = data.title || 'Next Up';
+  // "Buzzer" alerts (you're on deck / you're on / your game started) stay on screen until tapped
+  // and use a long, pager-style vibration. Phones that ignore custom vibration still buzz with
+  // their normal notification pattern, and the alert is re-sent until the player answers.
+  const big = !!data.big;
   event.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',
     tag: data.tag || 'nextup',
     renotify: true,
+    requireInteraction: big,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    vibrate: [200, 100, 200],
+    vibrate: big ? [900, 150, 900, 150, 900, 150, 900, 400, 1500] : [200, 100, 200],
     data: { url: data.url || '/' }
   }));
 });

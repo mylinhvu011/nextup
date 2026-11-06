@@ -321,7 +321,7 @@ const err = async (p, status) => { const r = await p; assert.strictEqual(r.statu
       // can't add yourself, a signed-in player, or the same friend twice to one game
       await err(call('POST', `${F}/games/${ga.id}/friend`, { name: 'sam' }, sam.H), 400);
       assert.match(await err(call('POST', `${F}/games/${ga.id}/friend`, { name: 'Kim' }, sam.H), 409), /own phone/);
-      assert.match(await err(call('POST', `${F}/games/${ga.id}/friend`, { name: 'jo' }, sam.H), 409), /already on Game/);
+      assert.match(await err(call('POST', `${F}/games/${ga.id}/friend`, { name: 'jo' }, sam.H), 409), /already on that game/);
       // another player can't take over Sam's friend
       assert.match(await err(call('POST', `${F}/games/${gb.id}/friend`, { name: 'Jo' }, kim.H), 409), /already added by Sam/);
       // friend follows the sign-up limit (1 game at a time)
@@ -338,7 +338,7 @@ const err = async (p, status) => { const r = await p; assert.strictEqual(r.statu
       // starting Jo's game sends Jo's alert to Sam
       await ok(call('POST', `${FM}/games/${ga.id}/action`, { action: 'start' }, M));
       await sleep(400);
-      assert.ok(notes.some(n => /^For Jo: Game \d+ is on/.test(n.title)), 'Sam got Jo\'s alert: ' + JSON.stringify(notes.map(n => n.title)));
+      assert.ok(notes.some(n => /^For Jo: You.re playing/.test(n.title)), 'Sam got Jo\'s alert: ' + JSON.stringify(notes.map(n => n.title)));
       // can't change a friend once the game started
       await err(call('POST', `${F}/games/${ga.id}/friends/${jo.friendId}/remove`, {}, sam.H), 409);
 

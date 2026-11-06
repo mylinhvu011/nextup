@@ -5,12 +5,19 @@ A live, phone-friendly replacement for the sign-up whiteboards at pickup games. 
 - **Organizers** create an account, start an event for the day, set the rules, and run the games: start/pause timers, add or remove time, end & clear a game, swap pinnies, reorder games, add walk-ups, remove people, send announcements.
 - **Players** open the site, type the event's **4-digit code** (or the organizer's custom password) and **just their name**. They see who's on the field, the line, and who has pinnies, and they get **push notifications**:
   - "You're signed in as …" when they turn alerts on
-  - "You're up next!" when their game reaches the front of the line
+  - "You're on deck!" when their game is next to play
   - "Get ready" a few minutes before the current game ends (configurable)
   - "You're on!" when the current game's time runs out
-  - "Game N is on — you're on the pinnies team" when their game starts
+  - "You're playing — Field 1!" when their game starts (with their team and pinnies)
   - Organizer announcements
+- Games are named by where they are, not by number: **Playing now**, **On deck** (plays next), **Almost there** (the one after), then **3rd in line**, **4th in line**… With several fields, each step of the line is as many boards as there are fields.
 - Every phone updates **live**, no refreshing.
+
+### The buzzer
+The four big alerts (on deck, get ready, you're on, your game started) work like a restaurant pager:
+- **App open:** the screen turns into a flashing full-screen alert with a loud two-tone siren and long vibrations, repeating until the player taps **I'm coming** (the sound stops on its own after 90 seconds). While someone waits in line, the app keeps the screen awake so the buzzer can be seen and heard; a **Test it** button lets players hear it first.
+- **Phone locked / app closed:** the notification stays on the lock screen until tapped, with a long vibration where the phone allows it, and is **sent again twice, 30 seconds apart**, until the player opens the app and taps I'm coming (or isn't on that game any more).
+- Limits phones set: iPhones don't let websites vibrate or play sound in the background, so on iPhone the lock-screen notifications (from the Home Screen app) and their repeats do the work. Sound needs the player to have tapped the page once since opening it, and the phone's ringer/volume has to be on.
 
 ---
 
@@ -110,7 +117,7 @@ Built-in rules: nobody can sign up twice for the same game; names are unique wit
 
 - **Android / computers (Chrome, Edge, Firefox):** tap **Turn on** in the yellow bar and allow notifications. No install needed.
 - **iPhone / iPad (iOS 16.4+):** Apple only allows web notifications for sites on the Home Screen. Open the site in Safari → Share → **Add to Home Screen** → open Next Up from the new icon → **Turn on**. The app shows these steps automatically.
-- With the page open, it also beeps, vibrates and shows a banner when you're up.
+- With the page open, the buzzer takes over the screen (see "The buzzer" above).
 - The alerts banner stays at the top with **Turn on / Turn off**, so anyone can opt out (and back in) any time. Organizers have the same toggle for their own time's-up alerts.
 
 ---

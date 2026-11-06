@@ -170,11 +170,78 @@ function beep() {
 }
 let quiet = false; // true when this person turned alerts off: banner only, no beep/buzz
 function onNotice(n) {
+  if (n.big && !quiet) return buzzer(n);
   toast(n.title + (n.body ? ' — ' + n.body : ''), 'alert', 7000);
   if (quiet) return;
   beep();
   try { navigator.vibrate?.([200, 100, 200]); } catch {}
 }
+
+/* ---------------- the buzzer ----------------
+   Like a restaurant pager: the big alerts (on deck, get ready, you're on, your game started) take
+   over the screen with flashing colors, a loud two-tone siren and long vibrations, repeating until
+   the player taps "I'm coming" (sound stops on its own after 90 seconds). */
+function siren() {
+  if (!audioCtx) return;
+  try {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const t = audioCtx.currentTime;
+    const out = audioCtx.createDynamicsCompressor();
+    out.connect(audioCtx.destination);
+    for (let i = 0; i < 6; i++) {
+      const d = i * 0.3, hi = i % 2 === 1;
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t + d);
+      g.gain.exponentialRampToValueAtTime(0.9, t + d + 0.015);
+      g.gain.setValueAtTime(0.9, t + d + 0.24);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.28);
+      g.connect(out);
+      for (const [type, f] of [['square', hi ? 1047 : 784], ['sawtooth', hi ? 1568 : 1175]]) {
+        const o = audioCtx.createOscillator();
+        o.type = type; o.frequency.setValueAtTime(f, t + d);
+        o.connect(g); o.start(t + d); o.stop(t + d + 0.3);
+      }
+    }
+  } catch {}
+}
+const BUZZ = [900, 150, 900, 150, 900, 150, 900];
+let buzz = null;      // the buzzer on screen right now
+let buzzAck = null;   // set by the player screen: tells the server to stop repeat alerts
+function buzzer(n) {
+  if (buzz) buzz.stop();
+  const el = document.createElement('div');
+  el.className = 'buzzer';
+  el.setAttribute('role', 'alertdialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-labelledby', 'buzzT');
+  el.innerHTML = `<div class="buzzer-inner">
+      <div class="buzzer-ring" aria-hidden="true"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 21h4"/><path d="M3 7.5C3.6 5.5 4.6 4 6 3M21 7.5C20.4 5.5 19.4 4 18 3"/></svg></div>
+      <h2 id="buzzT">${esc(n.title)}</h2>
+      ${n.body ? `<p>${esc(n.body)}</p>` : ''}
+      <button class="buzzer-btn" type="button">I'm coming</button>
+    </div>`;
+  document.body.appendChild(el);
+  const loop = () => { siren(); try { navigator.vibrate?.(BUZZ); } catch {} };
+  loop();
+  const iv = setInterval(loop, 3600);
+  const quietAfter = setTimeout(() => { clearInterval(iv); el.classList.add('calm'); }, 90000);
+  buzz = {
+    stop() { clearInterval(iv); clearTimeout(quietAfter); try { navigator.vibrate?.(0); } catch {} el.remove(); buzz = null; }
+  };
+  const btn = el.querySelector('.buzzer-btn');
+  btn.onclick = () => { buzz && buzz.stop(); if (buzzAck) buzzAck(); };
+  btn.focus();
+}
+// Keep the screen on while someone is waiting in line, so the buzzer can be seen and heard.
+let wakeLock = null, wantAwake = false;
+async function keepAwake(on) {
+  wantAwake = on;
+  try {
+    if (on && !wakeLock && 'wakeLock' in navigator && document.visibilityState === 'visible') {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) { const w = wakeLock; wakeLock = null; await w.release(); }
+  } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && wantAwake) keepAwake(true); });
 
 /* ---------------- in-app confirm / prompt ----------------
    The browser's built-in confirm()/prompt() boxes are silently blocked in some places
@@ -220,7 +287,7 @@ function friendDialog(s, g) {
     d.className = 'ask';
     d.innerHTML = `<form method="dialog" novalidate>
       <div class="dlg-body">
-        <p class="ask-msg"><b>Add a friend to Game ${g.number}</b></p>
+        <p class="ask-msg"><b>Add a friend to ${esc(gameRef(s, g))}</b></p>
         <label for="fr_name" style="margin-top:12px">Friend's name</label>
         <input id="fr_name" maxlength="24" placeholder="e.g. Jo M." autocomplete="off" autocapitalize="words">
         <label style="margin-top:12px">Team</label>
@@ -569,10 +636,19 @@ const bibSvg = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 const ordinal = n => n + (['th', 'st', 'nd', 'rd'][(n % 100 - 20) % 10] || ['th', 'st', 'nd', 'rd'][n % 100] || 'th');
 const inGame = (g, pid) => g.teams.a.includes(pid) || g.teams.b.includes(pid);
 
-function queueLabel(s, idx) {
-  if (idx < s.settings.fields) return '<span class="tag next">Up next</span>';
-  return `<span class="tag">${ordinal(idx + 1)} in line</span>`;
+// Games are named by where they are, not by number: "Playing now", "On deck" (plays next),
+// "Almost there" (the round after), then "3rd in line", "4th in line"… With several fields,
+// each round of the line is as many boards as there are fields.
+function lineName(s, idx) {
+  const wave = Math.floor(Math.max(0, idx) / Math.max(1, s.settings.fields));
+  return wave === 0 ? 'On deck' : wave === 1 ? 'Almost there' : `${ordinal(wave + 1)} in line`;
 }
+function gameName(s, g) {
+  if (g.status === 'playing') return 'Playing now';
+  return lineName(s, s.games.filter(x => x.status === 'open').indexOf(g));
+}
+// For sentences: "the game on Field 1", "the On deck game"
+const gameRef = (s, g) => !g ? 'that game' : g.status === 'playing' ? (g.field ? `the game on ${g.field}` : 'the game playing now') : `the ${gameName(s, g)} game`;
 
 function teamCol(s, g, team, opts) {
   const cap = s.settings.playersPerTeam;
@@ -616,10 +692,12 @@ function boardHtml(s, g, opts) {
   const mine = opts.meId && inGame(g, opts.meId);
   let label;
   if (g.status === 'playing') label = `<span class="tag live">${g.field ? esc(g.field) : 'On the field'}</span>`;
-  else label = queueLabel(s, opts.idx) + (full ? '<span class="tag full">Full</span>' : '');
+  else label = full ? '<span class="tag full">Full</span>' : '';
+  const name = g.status === 'playing' ? 'Playing now' : lineName(s, opts.idx);
+  const wave = g.status === 'playing' ? -1 : Math.floor(opts.idx / Math.max(1, s.settings.fields));
   const right = g.status === 'playing' ? timerHtml(g) : `<span class="muted small">${count}/${s.settings.playersPerTeam * 2}</span>`;
   return `<article class="board ${g.status} ${mine ? 'mine' : ''}" id="g-${g.id}">
-    <header class="board-head"><div><span class="board-num">Game ${g.number}</span>${label}</div>${right}</header>
+    <header class="board-head"><div><span class="board-num ${wave === 0 ? 'ondeck' : wave === 1 ? 'almost' : ''}">${name}</span>${label}</div>${right}</header>
     <div class="teams">${teamCol(s, g, 'a', opts)}${teamCol(s, g, 'b', opts)}</div>
     ${opts.footer ? `<footer class="board-foot">${opts.footer}</footer>` : ''}
   </article>`;
@@ -694,7 +772,7 @@ function homeView(prefill = '') {
         let r = await api('POST', '/api/join', { code, name: $('#name').value });
         if (r.needsConfirm) {
           // Someone already put this name on the list — check it's really them.
-          const where = r.games.map(g => `Game ${g.number} (Team ${g.team}${g.playing ? ', playing now' : ''})`).join(', ');
+          const where = r.games.map(g => `${g.label || (g.playing ? 'Playing now' : 'a game')} (Team ${g.team})`).join(', ');
           let msg;
           if (r.signedIn) msg = `"${r.name}" is already signed in at this event${where ? ` — on ${where}` : ''}.\n\nIs that you? (Got signed out, or switched phones?)`;
           else msg = `${r.addedBy ? `${r.addedBy} added "${r.name}"` : `The organizer added "${r.name}"`} to the list: ${where}.\n\nIs that you?`;
@@ -764,6 +842,7 @@ async function playerView(eventId) {
   store.set('nu.lastEvent', eventId);
   store.set('nu.player.' + eventId, { ...sess, name: me.name, eventName: state.name, eventCode: state.code });
   live = { state, offset: state.serverNow - Date.now() };
+  buzzAck = () => papi(eventId, 'POST', `/api/events/${eventId}/ack`).catch(() => {});
   topnav.innerHTML = `<span class="who">${esc(me.name)}</span><button data-act="signout">Sign out</button>`;
 
   const render = makeRenderer(() => renderPlayer(live.state, me));
@@ -792,13 +871,17 @@ async function playerView(eventId) {
   const act = async (el) => {
     const a = el.dataset.act, gid = el.dataset.gid, pid = el.dataset.pid;
     try {
+      if (a === 'test-buzzer') {
+        buzzer({ title: 'This is your buzzer', body: "It goes off like this when you're on deck and when it's time to play. Tap below to stop it." });
+        return;
+      }
       if (a === 'add-friend') {
         const g = live.state.games.find(x => x.id === gid);
         if (!g) return;
         const r = await friendDialog(live.state, g);
         if (!r) return;
         await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/friend`, { name: r.name, team: r.team || undefined });
-        toast(`${r.name} is on Game ${g.number} — you'll get their alerts`);
+        toast(`${r.name} is on ${gameRef(live.state, g)} — you'll get their alerts`);
         return;
       }
       if (a === 'self-switch') {
@@ -813,7 +896,7 @@ async function playerView(eventId) {
       if (a === 'friend-remove') {
         const nm = live.state.players[pid]?.name || 'your friend';
         const g = live.state.games.find(x => x.id === gid);
-        if (!(await uiConfirm(`Take ${nm} off Game ${g ? g.number : ''}?`, { ok: 'Take off', danger: true }))) return;
+        if (!(await uiConfirm(`Take ${nm} off ${gameRef(live.state, g)}?`, { ok: 'Take off', danger: true }))) return;
         await papi(eventId, 'POST', `/api/events/${eventId}/games/${gid}/friends/${pid}/remove`);
         return;
       }
@@ -876,17 +959,18 @@ function renderPlayer(s, me) {
   if (myPlaying) {
     const team = myPlaying.teams.a.includes(me.id) ? 'a' : 'b';
     status = `<div class="card status playing"><div><div class="big">You're playing</div></div>${timerHtml(myPlaying)}
-      <div class="sub">${myPlaying.field ? `<b>${esc(myPlaying.field)}</b> · ` : ''}Game ${myPlaying.number} · Team ${team === 'a' ? 1 : 2} · ${myPlaying.pinnies === team ? '<b>wear a pinnie</b>' : 'no pinnie'}</div></div>`;
+      <div class="sub">${myPlaying.field ? `<b>${esc(myPlaying.field)}</b> · ` : ''}Team ${team === 'a' ? 1 : 2} · ${myPlaying.pinnies === team ? '<b>wear a pinnie</b>' : 'no pinnie'}</div></div>`;
   } else if (myOpenIdx >= 0) {
     const g = open[myOpenIdx];
     const team = g.teams.a.includes(me.id) ? 'a' : 'b';
     const wave = Math.floor(myOpenIdx / st.fields);
     const etaMin = Math.round((shortest + wave * st.gameMinutes * 60000) / 60000);
     const next = myOpenIdx < st.fields;
+    const almost = !next && myOpenIdx < st.fields * 2;
     const eta = playing.length ? (next ? `Current game: ${timerHtml(playing[0])} left` : `About ${etaMin} min away`) : (next ? 'Waiting for the organizer to start' : `About ${etaMin + st.gameMinutes} min away`);
     status = `<div class="card status ${next ? 'next' : 'waiting'}">
-      <div class="big">${next ? "You're up next!" : `You're ${ordinal(myOpenIdx + 1)} in line`}</div>
-      <div class="muted small" style="text-align:right">Game ${g.number}</div>
+      <div class="big">${next ? "You're on deck!" : almost ? 'Almost there' : `You're ${lineName(s, myOpenIdx)}`}</div>
+      <div></div>
       <div class="sub">${eta} · Team ${team === 'a' ? 1 : 2}${g.pinnies === team ? ' (pinnies)' : ''}</div></div>`;
   } else {
     const spotsLeft = open.some(g => g.teams.a.length + g.teams.b.length < st.playersPerTeam * 2);
@@ -897,10 +981,12 @@ function renderPlayer(s, me) {
       <div class="sub">${sub}</div></div>`;
   }
 
+  keepAwake(myOpenIdx >= 0);
+  const buzzLine = myOpenIdx >= 0 && !quiet ? `<p class="buzz-line"><span><b>Buzzer on.</b> Keep this page open with your volume up — the screen stays on while you wait.</span><button class="btn small" data-act="test-buzzer">Test it</button></p>` : '';
   const myFriendSpots = [];
   for (const g of s.games) for (const pid of [...g.teams.a, ...g.teams.b]) {
     const fp = s.players[pid];
-    if (fp && fp.addedBy === me.id) myFriendSpots.push(`<b>${esc(fp.name)}</b> · ${g.status === 'playing' ? 'playing now' : `Game ${g.number}`}`);
+    if (fp && fp.addedBy === me.id) myFriendSpots.push(`<b>${esc(fp.name)}</b> · ${gameName(s, g).toLowerCase()}`);
   }
   const friendsLine = myFriendSpots.length ? `<p class="friends-line">👥 Your friends: ${myFriendSpots.join(' &nbsp;|&nbsp; ')} <span class="muted">— you'll get their alerts</span></p>` : '';
 
@@ -930,6 +1016,7 @@ function renderPlayer(s, me) {
     ${alertBar(me.alerts, 'alerts', 'alerts-off')}
     ${s.closing ? `<div class="lastcall"><b>🏁 Last call</b><span>No new games after the ones on the board. ${open.length ? `${open.length} game${open.length > 1 ? 's' : ''} left in the line.` : 'These are the final games.'}</span></div>` : ''}
     ${status}
+    ${buzzLine}
     ${friendsLine}
     <button type="button" class="codechip" data-act="share" aria-label="Share the event code">
       <span class="codechip-label">${s.codeType === 'custom' ? 'Event password' : 'Event code'}</span>
@@ -1785,7 +1872,7 @@ async function managerEventView(eventId) {
       switch (a) {
         case 'start': {
           const busy = s.games.filter(x => x.status === 'playing').length;
-          if (busy >= s.settings.fields && !(await uiConfirm(`${busy === 1 ? 'A game is' : `${busy} games are`} still on the field. Start Game ${g.number} anyway?`))) return;
+          if (busy >= s.settings.fields && !(await uiConfirm(`${busy === 1 ? 'A game is' : `${busy} games are`} still on the field. Start the ${gameName(s, g)} game anyway?`))) return;
           const sel = app.querySelector(`.pick-start[data-gid="${gid}"]`);
           await gameAct(gid, 'start', { field: sel && sel.value !== '__other' ? sel.value : undefined });
           delete fieldChoice[gid];
@@ -1795,21 +1882,21 @@ async function managerEventView(eventId) {
           await gameAct(gid, a); break;
         case 'addtime': await gameAct(gid, 'addtime', { seconds: Number(el.dataset.sec) }); break;
         case 'end':
-          if (!(await uiConfirm(`End Game ${g.number} and clear the board?`, { ok: 'End game', danger: true }))) return;
-          await gameAct(gid, 'end'); toast(`Game ${g.number} cleared`); break;
+          if (!(await uiConfirm(`End ${gameRef(s, g)} and clear the board?`, { ok: 'End game', danger: true }))) return;
+          await gameAct(gid, 'end'); toast('Game ended'); break;
         case 'delete': {
           const n = g.teams.a.length + g.teams.b.length;
-          if (!(await uiConfirm(`Delete Game ${g.number}?${n ? ` The ${n} player${n > 1 ? 's' : ''} on it will be taken off.` : ''}`, { ok: 'Delete', danger: true }))) return;
-          await gameAct(gid, 'delete'); toast(`Game ${g.number} deleted`); break;
+          if (!(await uiConfirm(`Delete ${gameRef(s, g)}?${n ? ` The ${n} player${n > 1 ? 's' : ''} on it will be taken off.` : ''}`, { ok: 'Delete', danger: true }))) return;
+          await gameAct(gid, 'delete'); toast('Board deleted'); break;
         }
         case 'clear': {
           const n = g.teams.a.length + g.teams.b.length;
-          if (!(await uiConfirm(`Take all ${n} player${n > 1 ? 's' : ''} off Game ${g.number}? The board stays in the line, empty.`, { ok: 'Clear board', danger: true }))) return;
-          await gameAct(gid, 'clear'); toast(`Game ${g.number} cleared`); break;
+          if (!(await uiConfirm(`Take all ${n} player${n > 1 ? 's' : ''} off ${gameRef(s, g)}? The board stays in the line, empty.`, { ok: 'Clear board', danger: true }))) return;
+          await gameAct(gid, 'clear'); toast('Board cleared'); break;
         }
         case 'switch': await mapi('POST', `${base}/games/${gid}/players/${pid}/switch`); break;
         case 'rm-player':
-          if (!(await uiConfirm(`Take ${s.players[pid]?.name} off Game ${g.number}?`))) return;
+          if (!(await uiConfirm(`Take ${s.players[pid]?.name} off ${gameRef(s, g)}?`))) return;
           await mapi('POST', `${base}/games/${gid}/players/${pid}/remove`); break;
         case 'add-game': await mapi('POST', `${base}/games`); break;
         case 'release':
@@ -1872,11 +1959,11 @@ async function managerEventView(eventId) {
     const gid = sel.dataset.gid, g = findG(gid);
     let val = sel.value;
     if (val === '__other') {
-      val = (await uiPrompt(`Field name for Game ${g ? g.number : ''}:`, '', { ok: 'Use this field' }) || '').trim().slice(0, 24);
+      val = (await uiPrompt('Field name:', '', { ok: 'Use this field' }) || '').trim().slice(0, 24);
       if (!val) { render(); return; }
     }
     try {
-      if (sel.classList.contains('pick-move')) { await gameAct(gid, 'field', { field: val }); toast(`Game ${g.number} is on ${val}`); }
+      if (sel.classList.contains('pick-move')) { await gameAct(gid, 'field', { field: val }); toast(`Moved to ${val}`); }
       else { fieldChoice[gid] = val; render(); }
     } catch (ex) { toast(ex.message, 'warn'); render(); }
   };
@@ -1973,10 +2060,10 @@ function renderManager(s) {
         <button class="btn small" data-act="addtime" data-sec="-60" data-gid="${g.id}">−1 min</button>
         <button class="btn small" data-act="addtime" data-sec="60" data-gid="${g.id}">+1 min</button>
         <button class="btn small" data-act="pinnies" data-gid="${g.id}">Swap pinnies</button>
-        ${fieldSelect('pick-move', g.id, g.field || names[0], `Field for Game ${g.number}`)}
+        ${fieldSelect('pick-move', g.id, g.field || names[0], 'Field for this game')}
       </div>
       <button class="btn small solid-danger" data-act="end" data-gid="${g.id}">End &amp; clear</button>
-      <form data-walkup="${g.id}"><input placeholder="Add sub / walk-up name" maxlength="24" aria-label="Add player to Game ${g.number}"><button class="btn small">Add</button></form>`;
+      <form data-walkup="${g.id}"><input placeholder="Add sub / walk-up name" maxlength="24" aria-label="Add player to this game"><button class="btn small">Add</button></form>`;
     return boardHtml(s, g, { manager: true, footer });
   }).join('') : `<div class="empty">No game on the field. Hit <b>Start</b> on the next game below.</div>`;
 
@@ -1989,12 +2076,12 @@ function renderManager(s) {
   };
   const queueHtml = open.length ? open.map((g, idx) => {
     const pick = fieldChoice[g.id] || firstFree;
-    const footer = `<div class="start-group">${fieldSelect('pick-start', g.id, pick, `Field for Game ${g.number}`)}<button class="btn small primary" data-act="start" data-gid="${g.id}">▶ Start game</button></div>
+    const footer = `<div class="start-group">${fieldSelect('pick-start', g.id, pick, `Field for the ${gameName(s, g)} game`)}<button class="btn small primary" data-act="start" data-gid="${g.id}">▶ Start game</button></div>
       <button class="iconbtn" title="Move up" aria-label="Move up" data-act="up" data-gid="${g.id}" ${idx === 0 ? 'disabled' : ''}>↑</button>
       <button class="iconbtn" title="Move down" aria-label="Move down" data-act="down" data-gid="${g.id}" ${idx === open.length - 1 ? 'disabled' : ''}>↓</button>
       <button class="btn small" data-act="pinnies" data-gid="${g.id}">Swap pinnies</button>
       ${removeBtn(g)}
-      <form data-walkup="${g.id}"><input placeholder="Add walk-up name" maxlength="24" aria-label="Add player to Game ${g.number}"><button class="btn small">Add</button></form>`;
+      <form data-walkup="${g.id}"><input placeholder="Add walk-up name" maxlength="24" aria-label="Add player to the ${gameName(s, g)} game"><button class="btn small">Add</button></form>`;
     return boardHtml(s, g, { manager: true, idx, footer });
   }).join('') : '<div class="empty">No games waiting.</div>';
 
@@ -2062,7 +2149,7 @@ function renderManager(s) {
     </section>
 
     ${s.history.length ? `<h2 class="section-title">Recent games</h2><section class="card"><ul class="roster history">${s.history.slice().reverse().map(h =>
-      `<li>Game ${h.number} · ended ${new Date(h.endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${h.teams.a.length + h.teams.b.length} players</li>`).join('')}</ul></section>` : ''}
+      `<li>${h.field ? esc(h.field) + ' · ' : ''}Ended ${new Date(h.endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${h.teams.a.length + h.teams.b.length} players</li>`).join('')}</ul></section>` : ''}
 
     <div class="row" style="margin:22px 0 40px;justify-content:center">
       <button class="btn small" data-act="player-view">Open player view</button>
@@ -2084,6 +2171,8 @@ function qrSvg(text) {
 /* ================================================================== */
 function route() {
   if (view) { view.cleanup(); view = null; }
+  if (buzz) buzz.stop();
+  buzzAck = null; keepAwake(false);
   resetTheme();
   if (dlg.open) dlg.close();
   const h = location.hash.replace(/^#/, '') || '/';

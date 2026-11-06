@@ -594,3 +594,33 @@ dialog .set-editor { gap: 12px; }
 .date-list .grow span { font-size: 13px; color: var(--ink-2); }
 .date-list li.skipped b { text-decoration: line-through; color: var(--ink-3); }
 .date-list li.skipped .grow span { color: #b45309; font-weight: 600; }
+
+/* Game names: On deck / Almost there stand out */
+.board-num.ondeck { color: var(--grass); }
+.board-num.almost { color: var(--ink); }
+
+/* The buzzer: a full-screen pager alert */
+.buzz-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: -4px 0 12px; padding: 10px 12px; border-radius: 12px; background: var(--surface); border: 1px dashed var(--line); font-size: 13px; color: var(--ink-2); }
+.buzz-line b { color: var(--ink); }
+.buzz-line .btn { flex-shrink: 0; }
+.buzzer {
+  position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px;
+  background: var(--pinnie, #ff7a1a); color: #fff; text-align: center;
+  animation: buzz-flash .5s steps(1) infinite;
+}
+.buzzer.calm { animation: none; background: var(--grass); }
+@keyframes buzz-flash { 0% { background: var(--pinnie, #ff7a1a); } 50% { background: #d6001c; } }
+.buzzer-inner { max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.buzzer h2, .buzzer-ring svg { animation: buzz-shake .4s ease-in-out infinite; }
+.buzzer.calm h2, .buzzer.calm .buzzer-ring svg { animation: none; }
+@keyframes buzz-shake { 0%, 100% { transform: translateX(0) rotate(0); } 25% { transform: translateX(-6px) rotate(-2deg); } 75% { transform: translateX(6px) rotate(2deg); } }
+.buzzer-ring { width: 120px; height: 120px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,.18); box-shadow: 0 0 0 0 rgba(255,255,255,.6); animation: buzz-ring 1s ease-out infinite; }
+@keyframes buzz-ring { to { box-shadow: 0 0 0 40px rgba(255,255,255,0); } }
+.buzzer h2 { margin: 0; font: 800 clamp(44px, 13vw, 76px)/0.95 var(--display); text-transform: uppercase; letter-spacing: .01em; text-shadow: 0 3px 0 rgba(0,0,0,.18); }
+.buzzer p { margin: 0; font-size: 19px; line-height: 1.4; font-weight: 600; }
+.buzzer-btn { margin-top: 10px; min-width: 240px; height: 68px; border: 0; border-radius: 18px; background: #fff; color: #12201a; font: 800 26px/1 var(--display); text-transform: uppercase; letter-spacing: .04em; box-shadow: 0 6px 0 rgba(0,0,0,.2); cursor: pointer; }
+.buzzer-btn:active { transform: translateY(3px); box-shadow: 0 3px 0 rgba(0,0,0,.2); }
+@media (prefers-reduced-motion: reduce) {
+  .buzzer, .buzzer h2, .buzzer-ring, .buzzer-ring svg { animation: none; }
+  .buzzer { background: #d6001c; }
+}
