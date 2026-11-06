@@ -235,6 +235,7 @@ export class EventRoom extends DurableObject {
     this.sendTo('p:' + pid, { type: 'notice', data: payload });
     if (p.subs.length) this.queuePush(p.subs, payload, pid);
     if (big) this.queueRepeat(pid, pid, payload, gid);
+    else if (ev.rq && tag) ev.rq = ev.rq.filter(r => r.payload.tag !== payload.tag && r.payload.tag !== payload.tag + '-' + pid); // newer news about that game
     // A friend who isn't on their own phone: tell the person who added them.
     const host = p.guest && p.addedBy && ev.players[p.addedBy];
     if (host) {
@@ -272,6 +273,18 @@ export class EventRoom extends DurableObject {
     this.sendTo('m', { type: 'notice', data: payload });
     if (ev.managerSubs.length) this.queuePush(ev.managerSubs, payload, 'm');
   }
+  // The buzzer: a game just ended (time ran out, or the organizer ended it), so the first waiting
+  // game that hasn't been buzzed yet is told to go on now, with its field, team and pinnies.
+  buzzNext(field) {
+    const ev = this.ev;
+    const ng = openGames(ev).find(x => !x.buzzed);
+    if (!ng || !gamePlayers(ng).length) return;
+    ng.buzzed = true;
+    const where = field || freeField(ev) || 'the field';
+    for (const team of ['a', 'b']) for (const pid of ng.teams[team]) {
+      this.notifyPlayer(pid, "You're on deck — go now!", `The last game just ended. Head to ${where} now. You're on ${teamLabel(ng, team)}.`, 'game-' + ng.id, { big: true, gid: ng.id });
+    }
+  }
   checkUpNext() {
     const ev = this.ev;
     const anyPlaying = playingGames(ev).length > 0;
@@ -279,9 +292,9 @@ export class EventRoom extends DurableObject {
       for (const pid of gamePlayers(g)) {
         if (g.notifiedNext.includes(pid)) continue;
         g.notifiedNext.push(pid);
-        this.notifyPlayer(pid, "You're on deck!",
-          anyPlaying ? 'Your game plays right after the current one. Stay close to the field.' : 'Your game is first in line.',
-          'game-' + g.id, { big: true, gid: g.id });
+        this.notifyPlayer(pid, 'Your game is next',
+          anyPlaying ? "You're first in line. Stay close to the field — we'll buzz you when it's time to go on." : "You're first in line. Stay close to the field.",
+          'game-' + g.id);
       }
     }
   }
@@ -357,19 +370,19 @@ export class EventRoom extends DurableObject {
         if (!g.warned && warnMs > 0 && t.durationMs > warnMs && rem > 0 && rem <= warnMs + 500) {
           g.warned = true; changed = true;
           const mins = Math.max(1, Math.round(rem / 60000));
-          const ngw = openGames(ev)[0];
-          if (ngw) for (const pid of gamePlayers(ngw)) {
-            this.notifyPlayer(pid, 'Get ready!', `About ${mins} min left in the current game${at(g)}. You're on next — warm up.`, 'game-' + ngw.id, { big: true, gid: ngw.id });
+          const ngw = openGames(ev).find(x => !x.headsUp);
+          if (ngw) {
+            ngw.headsUp = true;
+            for (const pid of gamePlayers(ngw)) {
+              this.notifyPlayer(pid, `You're on in about ${mins} min`, `About ${mins} min left in the current game${at(g)}. Get warmed up — we'll buzz you when it ends.`, 'game-' + ngw.id);
+            }
           }
         }
         if (!g.timeUp && rem <= 500) {
           g.timeUp = true; changed = true;
           t.running = false; t.endsAt = null; t.remainingMs = 0;
           this.notifyManager(`Time's up${g.field ? ' on ' + g.field : ''}`, 'End the game to clear the board and bring on the next one.');
-          const ngo = openGames(ev)[0];
-          if (ngo) for (const pid of gamePlayers(ngo)) {
-            this.notifyPlayer(pid, "You're on!", `Time's up on the current game. Head to ${g.field || 'the field'} now.`, 'game-' + ngo.id, { big: true, gid: ngo.id });
-          }
+          this.buzzNext(g.field);
         }
       }
       // Auto-close: events end on their own 12 hours after they open (organizers can extend).
@@ -845,8 +858,11 @@ export class EventRoom extends DurableObject {
         g.warned = false; g.timeUp = false;
         ev.games = [...playingGames(ev), ...openGames(ev)];
         ensureOpenBoard(ev); // the game left the line, so a fresh board takes its place
+        // Already buzzed when the last game ended? Then this is just a confirmation.
+        const buzzNow = !g.buzzed;
+        g.buzzed = true;
         for (const team of ['a', 'b']) for (const pid of g.teams[team]) {
-          this.notifyPlayer(pid, `You're playing — ${g.field}!`, `Head to ${g.field}. You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id, { big: true, gid: g.id });
+          this.notifyPlayer(pid, `You're playing — ${g.field}!`, `Head to ${g.field}. You're on ${teamLabel(g, team)}. ${ev.settings.gameMinutes} minutes on the clock.`, 'game-' + g.id, buzzNow ? { big: true, gid: g.id } : {});
         }
         this.checkUpNext();
         break;
@@ -879,6 +895,7 @@ export class EventRoom extends DurableObject {
       case 'end': {
         if (g.status !== 'playing') fail(409, 'Only a game in progress can be ended');
         ev.games = ev.games.filter(x => x !== g);
+        if (!g.timeUp) this.buzzNext(g.field);
         ev.history.push({
           number: g.number, endedAt: Date.now(), pinnies: g.pinnies, field: g.field || null,
           teams: { a: g.teams.a.map(p => ev.players[p]?.name || '?'), b: g.teams.b.map(p => ev.players[p]?.name || '?') }

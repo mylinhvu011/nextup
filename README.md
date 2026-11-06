@@ -5,18 +5,19 @@ A live, phone-friendly replacement for the sign-up whiteboards at pickup games. 
 - **Organizers** create an account, start an event for the day, set the rules, and run the games: start/pause timers, add or remove time, end & clear a game, swap pinnies, reorder games, add walk-ups, remove people, send announcements.
 - **Players** open the site, type the event's **4-digit code** (or the organizer's custom password) and **just their name**. They see who's on the field, the line, and who has pinnies, and they get **push notifications**:
   - "You're signed in as …" when they turn alerts on
-  - "You're on deck!" when their game is next to play
-  - "Get ready" a few minutes before the current game ends (configurable)
-  - "You're on!" when the current game's time runs out
-  - "You're playing — Field 1!" when their game starts (with their team and pinnies)
+  - "Your game is next" when their game reaches the front of the line
+  - "You're on in about 2 min" a few minutes before the current game ends (configurable)
+  - **The buzzer** — "You're on deck — go now!" with their field, team and pinnies — the moment the game before theirs ends (time runs out, or the organizer ends it early)
+  - "You're playing — Field 1!" when the organizer starts their game (this is the buzzer too if they weren't buzzed first, e.g. the first game of the night)
   - Organizer announcements
 - Games are named by where they are, not by number: **Playing now**, **On deck** (plays next), **Almost there** (the one after), then **3rd in line**, **4th in line**… With several fields, each step of the line is as many boards as there are fields.
 - Every phone updates **live**, no refreshing.
+- **Help built in:** players see a short "How it works" card the first time they join (alerts, keep the page open for the buzzer, adding friends); they can bring it back with "How Next Up works" at the bottom of their board. Organizers have a **Help & FAQ** page (`/#/manager/help`), linked from Your events and from event Settings.
 
 ### The buzzer
-The four big alerts (on deck, get ready, you're on, your game started) work like a restaurant pager:
+The buzzer goes off when the game before yours ends (the first game of the night buzzes when it starts). Everything else is a normal notification. The buzzer works like a restaurant pager:
 - **App open:** the screen turns into a flashing full-screen alert with a loud two-tone siren and long vibrations, repeating until the player taps **I'm coming** (the sound stops on its own after 90 seconds). While someone waits in line, the app keeps the screen awake so the buzzer can be seen and heard; a **Test it** button lets players hear it first.
-- **Phone locked / app closed:** the notification stays on the lock screen until tapped, with a long vibration where the phone allows it, and is **sent again twice, 30 seconds apart**, until the player opens the app and taps I'm coming (or isn't on that game any more).
+- **Phone locked / app closed:** there's no siren — browsers don't let a website make sound or run once it's closed or the phone is locked. What they get is the buzzer as a notification: it stays on the lock screen until tapped, with a long vibration where the phone allows it, and is **sent again twice, 30 seconds apart**, until the player opens the app and taps I'm coming (or isn't on that game any more).
 - Limits phones set: iPhones don't let websites vibrate or play sound in the background, so on iPhone the lock-screen notifications (from the Home Screen app) and their repeats do the work. Sound needs the player to have tapped the page once since opening it, and the phone's ringer/volume has to be on.
 
 ---

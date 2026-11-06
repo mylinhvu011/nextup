@@ -170,7 +170,7 @@ const err = async (p, status) => { const r = await p; assert.strictEqual(r.statu
     const last = msgs.filter(x => x.type === 'state').pop();
     const g = last.data.games.find(x => x.id === firstOpen.id);
     assert.ok(g.timeUp && !g.timer.running, 'alarm marked the game time-up: ' + JSON.stringify(g.timer));
-    assert.ok(msgs.some(x => x.type === 'notice' && /You're on!/.test(x.data.title)), 'next game told to go on');
+    assert.ok(msgs.some(x => x.type === 'notice' && /go now/.test(x.data.title) && x.data.big && /Head to Field 1/.test(x.data.body)), 'next game buzzed to go on, with the field');
     // Organizer removes Eli -> his socket is told
     await ok(call('POST', `/api/manager/events/${ev.id}/players/${e2.playerId}/remove`, {}, M));
     await sleep(300);

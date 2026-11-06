@@ -871,8 +871,14 @@ async function playerView(eventId) {
   const act = async (el) => {
     const a = el.dataset.act, gid = el.dataset.gid, pid = el.dataset.pid;
     try {
+      if (a === 'howto-close' || a === 'howto-open') {
+        if (a === 'howto-close') store.set('nu.howtoSeen', 1); else store.del('nu.howtoSeen');
+        render();
+        if (a === 'howto-open') $('.howto')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
       if (a === 'test-buzzer') {
-        buzzer({ title: 'This is your buzzer', body: "It goes off like this when you're on deck and when it's time to play. Tap below to stop it." });
+        buzzer({ title: 'This is your buzzer', body: "It goes off like this the moment the game before yours ends — that's your cue to head to the field. Tap below to stop it." });
         return;
       }
       if (a === 'add-friend') {
@@ -982,7 +988,19 @@ function renderPlayer(s, me) {
   }
 
   keepAwake(myOpenIdx >= 0);
-  const buzzLine = myOpenIdx >= 0 && !quiet ? `<p class="buzz-line"><span><b>Buzzer on.</b> Keep this page open with your volume up — the screen stays on while you wait.</span><button class="btn small" data-act="test-buzzer">Test it</button></p>` : '';
+  const howTo = store.get('nu.howtoSeen') ? '' : `<section class="card howto" aria-labelledby="howtoT">
+      <div class="howto-head"><h2 id="howtoT">How it works</h2><button class="iconbtn" data-act="howto-close" aria-label="Close how it works">✕</button></div>
+      <ol>
+        <li><span class="howto-ic" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 21h4"/></svg></span>
+          <span><b>Turn on alerts</b> with the bar at the top${isIOS && !isStandalone ? ' — on iPhone, add Next Up to your Home Screen first' : ''}. You'll get a heads-up when your game is next and 2 minutes before you're on.</span></li>
+        <li><span class="howto-ic" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg></span>
+          <span><b>Keep this page open</b> while you wait. When the game before yours ends, your phone goes off like a restaurant buzzer and tells you which field. The screen stays on while you're in line.</span></li>
+        <li><span class="howto-ic" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M19 8v6M16 11h6"/></svg></span>
+          <span><b>Bringing a friend?</b> Tap <b>+ Add a friend</b> on any game. Their alerts come to your phone until they join on their own.</span></li>
+      </ol>
+      <button class="btn primary block" data-act="howto-close">Got it</button>
+    </section>`;
+  const buzzLine = myOpenIdx >= 0 && !quiet ? `<p class="buzz-line"><span><b>Buzzer on.</b> It goes off when the game before yours ends. Keep this page open with the volume up — the screen stays on while you wait.</span><button class="btn small" data-act="test-buzzer">Test it</button></p>` : '';
   const myFriendSpots = [];
   for (const g of s.games) for (const pid of [...g.teams.a, ...g.teams.b]) {
     const fp = s.players[pid];
@@ -1015,6 +1033,7 @@ function renderPlayer(s, me) {
   app.innerHTML = `
     ${alertBar(me.alerts, 'alerts', 'alerts-off')}
     ${s.closing ? `<div class="lastcall"><b>🏁 Last call</b><span>No new games after the ones on the board. ${open.length ? `${open.length} game${open.length > 1 ? 's' : ''} left in the line.` : 'These are the final games.'}</span></div>` : ''}
+    ${howTo}
     ${status}
     ${buzzLine}
     ${friendsLine}
@@ -1029,6 +1048,7 @@ function renderPlayer(s, me) {
     <h2 class="section-title">The line</h2>
     ${queueHtml}
     ${atLimit && open.length ? `<p class="muted small" style="margin-top:10px">Every board is full. A new board opens as soon as the next game starts.</p>` : ''}
+    ${howTo ? '' : '<p class="help-link"><button class="linkbtn" data-act="howto-open">How Next Up works</button></p>'}
   `;
 }
 
@@ -1453,6 +1473,7 @@ async function managerHomeView() {
       <p>Make an event, share the code, and the whiteboards run themselves.</p>
       <a class="btn primary block big" href="#/manager/new">${plusIcon} New event</a>
       <p class="small muted">Players don't need an account — they join with the code and their name.</p>
+      <a class="small" href="#/manager/help">How it works &amp; FAQ</a>
     </section>
     <p class="muted small" style="text-align:center">Here to play? <a href="#/">Join a game as a player</a></p>`;
     return;
@@ -1511,12 +1532,66 @@ async function managerHomeView() {
       <span class="grow"><b>New event</b><span>${hasSaved ? 'Same settings as last time' : 'Right now, or on repeat'}</span></span>${chev}
     </a>
     ${endedEvents.length ? `<div class="section-title"><span>Ended</span><span class="muted small" style="text-transform:none;font-family:var(--font)">${endedEvents.length} event${endedEvents.length === 1 ? '' : 's'}</span></div>
-      <nav class="ended-list" aria-label="Ended events">${endedEvents.map(endedRow).join('')}</nav>` : ''}`;
+      <nav class="ended-list" aria-label="Ended events">${endedEvents.map(endedRow).join('')}</nav>` : ''}
+    <p class="help-link"><a href="#/manager/help">Help &amp; FAQ</a></p>`;
   $$('[data-open-series]').forEach(b => b.onclick = async () => {
     b.disabled = true;
     try { const r = await mapi('POST', `/api/manager/series/${b.dataset.openSeries}/open`); location.hash = '#/manager/e/' + r.eventId; }
     catch (ex) { toast(ex.message, 'warn'); b.disabled = false; }
   });
+}
+
+/* ---------------- organizer help & FAQ ---------------- */
+const FAQ = [
+  ['Getting started', [
+    ['How do players join?', "Share the event's code or password, or let them scan the QR code on your event screen. They type the code and just their name — no account, no app store. On iPhone, alerts only work once they've added Next Up to their Home Screen; the app walks them through it."],
+    ['What do the board names mean?', "<b>Playing now</b> is on the field. <b>On deck</b> plays next, <b>Almost there</b> is the one after, then <b>3rd in line</b>, <b>4th in line</b> and so on. With two fields, two boards share each step (both go on together)."],
+    ['How many boards should I set?', "\"Boards in the line\" is how many waiting games show at once, like whiteboards. The line always fills back up to that number, and the game on the field doesn't count. 3 works for most nights; pick <b>Unlimited</b> if you'd rather a new board open whenever the others are full."],
+    ['What does "Games at the same time" do?', "It's the number of fields running at once. Each field gets a name (Field 1, Field 2 — rename them in settings), and when you start a game the first free field is picked for you."],
+  ]],
+  ['Running the line', [
+    ['Clear board vs. Delete — what\'s the difference?', "<b>Clear board</b> takes everyone off a waiting game but keeps the board in its spot. <b>Delete</b> removes the board for good (only when the line isn't a fixed count, or during last call). Either way, the players on it get a notification."],
+    ['Do I have to use the timer?', "No. Starting a game starts its clock, but you can pause it, add or take away a minute, or just tap <b>End game</b> whenever the game is actually over. Ending a game is what buzzes the next one, timer or not."],
+    ['What does Last call do?', "No new boards get added, but the games already on the board still play out and people can still grab open spots on them. Everyone gets a notice, and you get \"That's a wrap\" when the last game ends. <b>Reopen the line</b> undoes it."],
+    ['Can I add someone who doesn\'t have a phone?', "Yes — type their name into the walk-up box on any board. Players can also add friends themselves with <b>+ Add a friend</b>; the friend's alerts go to whoever added them."],
+  ]],
+  ['Notifications', [
+    ['What do players get notified about?', "Three things per game: <b>\"Your game is next\"</b> when their board reaches the front, <b>\"You're on in about 2 min\"</b> before the current game ends (change the minutes with the heads-up setting), and <b>the buzzer</b> — \"You're on deck, go now!\" with their field and team — the moment the game before theirs ends. They also hear about last call, your announcements, and anything you change about their game."],
+    ['What is the buzzer?', "With the app open, the whole screen flashes and plays a siren until they tap <b>I'm coming</b>, like a restaurant pager. With the phone locked it's a notification that's sent again twice, 30 seconds apart, until they answer. Tell players to leave the app open while they wait — the screen stays on."],
+    ['Why isn\'t a player getting alerts?', "Usually one of these: they didn't tap <b>Turn on</b>; they're on iPhone and not using the Home Screen app; they opened the link inside Instagram, GroupMe or another app's browser; they're in a private/incognito window; or their phone is on silent or Do Not Disturb. The Players list shows who has alerts on."],
+    ['Can I get alerts too?', "Yes — turn on alerts from the bar on your event screen. You'll hear when a game's time is up, when last call wraps up, and if the event closes on its own."],
+  ]],
+  ['Codes & ending', [
+    ['Why can\'t I use a code or password?', "Another event is using it right now — a live event, or a repeating event (which keeps its code between dates). The message tells you which of your events has it. End that event or stop repeating it and the code is free again. Capital letters don't matter."],
+    ['When does my event end?', "On its own 12 hours after it opens, unless you pick a different length or an end time in Settings → Event. The event screen shows when it will close, with <b>Keep open 1 more hour</b> if games run late. You can also tap <b>End event</b> any time."],
+    ['Can I reopen an event?', "No — once an event ends, its code is freed and players can't get back in. Start a new event (you can reuse the same code right away). The ended event's recap stays in your list until you delete it."],
+  ]],
+  ['Repeating events', [
+    ['How do repeating events work?', "On New event, choose <b>Repeats</b> and pick how often, which days, when games start and when sign-ups open. Each date opens on its own with the same settings and the <b>same code every time</b>, then closes at its end time."],
+    ['Why does my code say "No game right now"?', "That's a repeating event between dates. Players are told when it's next on. The code stays reserved for your repeating event so nobody else can take it."],
+    ['Can I skip a week or run an extra one?', "Yes. On the repeating event's page, tap <b>Skip</b> on any date (and Undo). <b>Open an event now</b> starts one right away with the same code — your scheduled dates stay as they are. <b>Stop repeating</b> frees the code; past dates stay in your events."],
+  ]],
+];
+function helpView() {
+  topnav.innerHTML = mgrSession() ? '<a href="#/manager">← Your events</a>' : '<a href="#/">Join a game</a>';
+  app.innerHTML = `
+    <div class="page-head">
+      <a class="back" href="#/manager" aria-label="Back to your events"><svg width="22" height="22" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4.5L7.5 11l6.5 6.5"></path></svg></a>
+      <h1>Help &amp; FAQ</h1>
+    </div>
+    <section class="card faq-intro">
+      <h2>A night with Next Up</h2>
+      <ol>
+        <li><b>Make an event</b> and share the code or QR.</li>
+        <li><b>Players join</b> with the code and their name, turn on alerts, and put their names on boards.</li>
+        <li><b>Start a game</b> on a field. When it ends, the next game's players get buzzed and head over.</li>
+        <li><b>Last call</b> when you're wrapping up; the event closes on its own later.</li>
+      </ol>
+    </section>
+    ${FAQ.map(([group, items]) => `
+      <h2 class="section-title">${group}</h2>
+      <div class="faq">${items.map(([q, a]) => `<details><summary>${q}</summary><p>${a}</p></details>`).join('')}</div>`).join('')}
+    <p class="muted small" style="text-align:center;margin:24px 0 40px">Players have their own short "How it works" on their board.</p>`;
 }
 
 /* ---------------- repeating event page ---------------- */
@@ -1570,7 +1645,8 @@ async function seriesPageView(id) {
       ${past.length ? `<h3 class="section-title">Past dates</h3>
         <nav class="ended-list" aria-label="Past dates">${past.map(e => `<a class="ended-row" href="#/manager/e/${e.id}"><span class="grow"><b>${dateText(e.createdAt)}</b><span>${e.gamesPlayed} game${e.gamesPlayed === 1 ? '' : 's'} · ${e.players} player${e.players === 1 ? '' : 's'}</span></span>${chev}</a>`).join('')}</nav>` : ''}
       <button class="btn block danger" id="srStop" style="margin-top:18px">Stop repeating</button>
-      <p class="muted small" style="text-align:center">Past dates stay in your events and the code is freed.</p>`;
+      <p class="muted small" style="text-align:center">Past dates stay in your events and the code is freed.</p>
+      <p class="help-link"><a href="#/manager/help">Help &amp; FAQ</a></p>`;
 
     $('#srShare').onclick = () => shareJoin(sr.code);
     $$('[data-skip]').forEach(b => b.onclick = async () => {
@@ -1988,7 +2064,7 @@ async function managerEventView(eventId) {
       <div class="dlg-body stack">
         <div><label for="s_name">Event name</label><input id="s_name" maxlength="60" value="${esc(s.name)}"></div>
         <div class="set-editor">${settingsFields(s.settings)}</div>
-        <p class="field-hint">Changes apply right away. A new game length applies to games that haven't started.</p>
+        <p class="field-hint">Changes apply right away. A new game length applies to games that haven't started. <a href="#/manager/help" target="_blank">What do these mean?</a></p>
       </div>
       <div class="dlg-foot"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="save" id="saveSet">Save</button></div>
     </form>`;
@@ -2039,7 +2115,8 @@ function renderManager(s) {
         <div class="row">
           <button class="btn small danger" data-act="delete-event">Delete event</button>
         </div>
-      </details>`;
+      </details>
+      <p class="help-link"><a href="#/manager/help">Help &amp; FAQ</a></p>`;
     return;
   }
 
@@ -2151,10 +2228,11 @@ function renderManager(s) {
     ${s.history.length ? `<h2 class="section-title">Recent games</h2><section class="card"><ul class="roster history">${s.history.slice().reverse().map(h =>
       `<li>${h.field ? esc(h.field) + ' · ' : ''}Ended ${new Date(h.endedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${h.teams.a.length + h.teams.b.length} players</li>`).join('')}</ul></section>` : ''}
 
-    <div class="row" style="margin:22px 0 40px;justify-content:center">
+    <div class="row" style="margin:22px 0 0;justify-content:center">
       <button class="btn small" data-act="player-view">Open player view</button>
       <button class="btn small danger" data-act="end-event">End event</button>
-    </div>`;
+    </div>
+    <p class="help-link"><a href="#/manager/help">Help &amp; FAQ</a></p>`;
 }
 
 function qrSvg(text) {
@@ -2199,6 +2277,7 @@ function route() {
   if (h === '/manager') return mgrSession() ? managerHomeView() : managerAuthView();
   if ((m = h.match(/^\/manager\/s\/([\w-]+)$/))) return mgrSession() ? seriesPageView(m[1]) : managerAuthView();
   if (h === '/manager/new') return mgrSession() ? newEventView() : managerAuthView();
+  if (h === '/manager/help') return helpView();
   if (h === '/manager/account') return mgrSession() ? accountView() : managerAuthView();
   if (h === '/manager/forgot') return managerAuthView('forgot-pw');
   if ((m = h.match(/^\/reset\/([\w-]+)$/))) return resetView(m[1]);

@@ -50,45 +50,58 @@ const titles = who => (inbox[who] || []).map(n => n.title + (n.repeat ? ' [repea
     const ev = await ok(call('POST', '/api/manager/events', { name: 'Buzz', settings: { playersPerTeam: 1, maxBoards: 3 } }, M));
     const join = async name => { const r = await ok(call('POST', '/api/join', { code: ev.code, name })); return { ...r, H: { 'X-Player-Token': r.token } }; };
     const E = `/api/events/${ev.id}`;
-    const ana = await join('Ana'), ben = await join('Ben');
-    await ok(call('POST', `${E}/push`, sub('ana'), ana.H));
-    await ok(call('POST', `${E}/push`, sub('ben'), ben.H));
+    const ana = await join('Ana'), ben = await join('Ben'), bo = await join('Bo'), cy = await join('Cy');
+    for (const [p, who] of [[ana, 'ana'], [ben, 'ben'], [bo, 'bo']]) await ok(call('POST', `${E}/push`, sub(who), p.H));
     await sleep(1500);
+    const G = `/api/manager/events/${ev.id}/games`;
     let st = await ok(call('GET', `/api/manager/events/${ev.id}`, null, M));
-    const [g1, g2] = st.games.filter(g => g.status === 'open');
+    const [g1, g2, g3] = st.games.filter(g => g.status === 'open');
+    await ok(call('POST', `${E}/games/${g1.id}/signup`, {}, bo.H));
+    await ok(call('POST', `${E}/games/${g1.id}/signup`, {}, cy.H));
+    // First game starts with nobody buzzed before -> the start alert is the buzzer
+    await ok(call('POST', `${G}/${g1.id}/action`, { action: 'start' }, M));
+    await ok(call('POST', `${E}/ack`, {}, bo.H));
+    // Ana is now first in line -> a normal notification, not the buzzer
+    await ok(call('POST', `${E}/games/${g2.id}/signup`, {}, ana.H));
+    await ok(call('POST', `${E}/games/${g3.id}/signup`, {}, ben.H));
+    await sleep(1500);
+    let a = titles('ana');
+    assert.ok(a.includes('Your game is next'), 'first in line = normal alert: ' + a);
+    assert.ok(!a.some(t => t.includes('[big]')), 'no buzzer yet: ' + a);
+    assert.ok(titles('bo').some(t => /^You're playing.*\[big\]/.test(t)), 'start buzzes when nobody was buzzed before: ' + titles('bo'));
 
-    // Ana takes the On deck board -> big alert, then it repeats twice (no answer)
-    await ok(call('POST', `${E}/games/${g1.id}/signup`, {}, ana.H));
-    // Ben takes the Almost there board -> no buzzer yet
-    await ok(call('POST', `${E}/games/${g2.id}/signup`, {}, ben.H));
-    await sleep(9000);
-    const a = titles('ana');
-    assert.ok(a.includes("You're on deck! [big]"), 'on-deck alert is a buzzer: ' + a);
-    assert.strictEqual(a.filter(t => t === "You're on deck! [repeat] [big]").length, 2, 'repeated twice: ' + a);
-    assert.ok(!titles('ben').some(t => t.includes('[big]')), 'nobody buzzes for Almost there: ' + titles('ben'));
+    // 2 minutes left -> normal "You're on in about 2 min"
+    const mins = st.settings.gameMinutes;
+    await ok(call('POST', `${G}/${g1.id}/action`, { action: 'addtime', seconds: -(mins * 60 - 100) }, M));
+    await sleep(2500);
+    a = titles('ana');
+    assert.ok(a.some(t => /^You're on in about 2 min$/.test(t)), 'heads-up is a normal alert: ' + a);
+    assert.ok(!a.some(t => t.includes('[big]')), 'still no buzzer: ' + a);
 
-    // Start Ana's game: Ana gets "You're playing", Ben is now On deck. Ben answers right away -> no repeats.
-    await ok(call('POST', `/api/manager/events/${ev.id}/games/${g1.id}/action`, { action: 'start' }, M));
-    await sleep(800);
+    // Time runs out -> the buzzer: "You're on deck — go now!" with the field, repeated twice (no answer)
+    await ok(call('POST', `${G}/${g1.id}/action`, { action: 'addtime', seconds: -100 }, M));
+    await sleep(9500);
+    a = titles('ana');
+    const go = inbox.ana.find(n => n.big && !n.repeat);
+    assert.ok(go && /go now/.test(go.title) && /Head to Field 1 now/.test(go.body), 'buzzer when the game ends, with the field: ' + JSON.stringify(go));
+    assert.strictEqual(a.filter(t => /go now! \[repeat\] \[big\]/.test(t)).length, 2, 'repeated twice: ' + a);
+
+    // Organizer ends it and starts Ana's game -> start is just a confirmation (she was already buzzed)
+    await ok(call('POST', `${G}/${g1.id}/action`, { action: 'end' }, M));
+    await ok(call('POST', `${G}/${g2.id}/action`, { action: 'start' }, M));
+    await sleep(1500);
+    a = titles('ana');
+    assert.ok(a.some(t => /^You're playing/.test(t) && !t.includes('[big]')), 'start after the buzzer is a normal alert: ' + a);
+    assert.ok(!titles('ben').some(t => t.includes('[big]')), 'ending a game that already timed out does not buzz the next one twice: ' + titles('ben'));
+
+    // Organizer ends Ana's game early -> Ben (next) gets the buzzer; he answers -> no repeats
+    await ok(call('POST', `${G}/${g2.id}/action`, { action: 'end' }, M));
+    await sleep(1000);
     await ok(call('POST', `${E}/ack`, {}, ben.H));
-    await ok(call('POST', `${E}/ack`, {}, ana.H));
     await sleep(7000);
     const b = titles('ben');
-    assert.ok(b.includes("You're on deck! [big]"), 'Ben buzzed when his game moved on deck: ' + b);
-    assert.ok(!b.some(t => t.includes('[repeat]')), "answering stops the repeats: " + b);
-    const a2 = titles('ana');
-    assert.ok(a2.some(t => /^You're playing/.test(t) && t.includes('[big]')), 'game start is a buzzer: ' + a2);
-    assert.ok(!a2.some(t => /^You're playing.*\[repeat\]/.test(t)), 'Ana answered: no repeats of the start alert: ' + a2);
-
-    // Repeats stop by themselves if the player is no longer on that game
-    await ok(call('POST', `/api/manager/events/${ev.id}/games/${g1.id}/action`, { action: 'end' }, M));
-    st = await ok(call('GET', `/api/manager/events/${ev.id}`, null, M));
-    const g3 = st.games.filter(g => g.status === 'open')[1];
-    await ok(call('POST', `${E}/games/${g3.id}/signup`, {}, ana.H)); // Almost there: no buzzer
-    await ok(call('POST', `${E}/games/${g2.id}/leave`, {}, ben.H));  // Ben leaves while his on-deck alert is pending
-    const before = titles('ben').length;
-    await sleep(7000);
-    assert.ok(!titles('ben').slice(before).some(t => t.includes('[repeat]')), 'no repeats after leaving the game');
+    assert.ok(b.some(t => /go now!.*\[big\]/.test(t)), 'ending a game early buzzes the next one: ' + b);
+    assert.ok(!b.some(t => t.includes('[repeat]')), 'answering stops the repeats: ' + b);
     console.log('buzzer: all checks passed');
   } finally { try { process.kill(-srv.pid); } catch { srv.kill(); } sink.close(); }
 })().catch(e => { console.error('FAILED:', e.stack); process.exit(1); });
